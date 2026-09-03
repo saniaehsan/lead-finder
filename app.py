@@ -230,6 +230,32 @@ only_no_website = st.checkbox(
 
 
 # ============================================================
+# RESULT FILTERS (applied to the saved results table below)
+# ============================================================
+
+col1, col2 = st.columns(2)
+
+with col1:
+
+    website_filter = st.selectbox(
+        "Website Filter",
+        [
+            "All",
+            "Only No Website",
+            "Only With Website"
+        ],
+        index=1
+    )
+
+with col2:
+
+    phone_filter = st.checkbox(
+        "Only businesses with phone numbers",
+        value=True
+    )
+
+
+# ============================================================
 # BUILD SEARCH LOCATION
 # ============================================================
 
@@ -553,25 +579,6 @@ if not st.session_state["leads"].empty:
         f"Saved Results "
         f"({len(df)} Total Leads)"
     )
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-
-        website_filter = st.selectbox(
-            "Website Filter",
-            [
-                "All",
-                "Only No Website",
-                "Only With Website"
-            ]
-        )
-
-    with col2:
-
-        phone_filter = st.checkbox(
-            "Only businesses with phone numbers"
-        )
 
     filtered_df = df.copy()
 
