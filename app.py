@@ -620,7 +620,13 @@ if not st.session_state["leads"].empty:
     st.dataframe(
         filtered_df,
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
+        column_config={
+            "Google Maps": st.column_config.LinkColumn(
+                "Google Maps",
+                display_text="Open in Maps"
+            )
+        }
     )
 
     output = BytesIO()

@@ -25,6 +25,9 @@ def search_google_maps(
             "places.websiteUri,"
             "places.internationalPhoneNumber,"
             "places.nationalPhoneNumber,"
+            "places.rating,"
+            "places.userRatingCount,"
+            "places.reviews,"
             "nextPageToken"
         )
     }
@@ -109,11 +112,31 @@ def search_google_maps(
             f"?api=1&query_place_id={place_id}"
         )
 
+        rating = place.get("rating", "")
+
+        review_count = place.get(
+            "userRatingCount",
+            ""
+        )
+
+        reviews = place.get("reviews", [])
+
+        if reviews:
+            last_review_time = reviews[0].get(
+                "relativePublishTimeDescription",
+                ""
+            )
+        else:
+            last_review_time = ""
+
         leads.append({
             "Business Name": name,
             "Phone Number": phone,
             "Address": address,
             "Website": website if website else "NO WEBSITE",
+            "Rating": rating,
+            "Reviews": review_count,
+            "Last Review": last_review_time,
             "Place ID": place_id,
             "Google Maps": google_maps_link
         })
