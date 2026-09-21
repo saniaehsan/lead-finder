@@ -9,7 +9,7 @@ def search_google_maps(
     api_key,
     business_type,
     location,
-    only_no_website=True,
+    only_no_website=False,
     page_token=None
 ):
 

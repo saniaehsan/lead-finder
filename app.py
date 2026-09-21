@@ -220,16 +220,6 @@ business_type = st.selectbox(
 
 
 # ============================================================
-# WEBSITE FILTER
-# ============================================================
-
-only_no_website = st.checkbox(
-    "Only businesses without a website",
-    value=True
-)
-
-
-# ============================================================
 # RESULT FILTERS (applied to the saved results table below)
 # ============================================================
 
@@ -244,14 +234,14 @@ with col1:
             "Only No Website",
             "Only With Website"
         ],
-        index=1
+        index=0
     )
 
 with col2:
 
     phone_filter = st.checkbox(
         "Only businesses with phone numbers",
-        value=True
+        value=False
     )
 
 
@@ -284,8 +274,7 @@ search_key = (
     f"{city}|"
     f"{county}|"
     f"{state}|"
-    f"{country}|"
-    f"{only_no_website}"
+    f"{country}"
 )
 
 
@@ -377,7 +366,7 @@ if st.button(
                     api_key=api_key,
                     business_type=business_type,
                     location=location,
-                    only_no_website=only_no_website,
+                    only_no_website=False,
                     page_token=page_token
                 )
 
@@ -484,7 +473,7 @@ if st.button(
 
                     st.warning(
                         f"Page {page_number}: "
-                        f"No no-website leads found "
+                        f"No matching leads found "
                         f"on this page."
                     )
 
@@ -617,10 +606,129 @@ if not st.session_state["leads"].empty:
         f"currently shown."
     )
 
-    st.dataframe(
-        filtered_df,
-        use_container_width=True,
-        hide_index=True
+    # Show every row on this same page (no internal scroll
+    # cutting results short). Height grows with the number of
+    # rows, capped so extremely large tables still scroll the
+    # normal page instead of becoming unusably tall.
+    table_height = min(
+        (len(filtered_df) + 1) * 35 + 3,
+        2000
+    )
+
+    # Build a clickable HTML version of the table (Website and
+    # Google Maps become real <a> links that open in a new tab).
+    # st.dataframe's LinkColumn depends on the Streamlit version
+    # installed, so this HTML table is used instead — it works
+    # the same way everywhere.
+
+    import html as html_lib
+
+    def make_link(url, link_text):
+
+        if (
+            not url
+            or str(url).strip().upper() == "NO WEBSITE"
+        ):
+            return "NO WEBSITE"
+
+        safe_url = html_lib.escape(
+            str(url),
+            quote=True
+        )
+
+        safe_text = html_lib.escape(
+            str(link_text)
+        )
+
+        return (
+            f'<a href="{safe_url}" target="_blank" '
+            f'rel="noopener noreferrer">{safe_text}</a>'
+        )
+
+    html_df = filtered_df.copy()
+
+    if "Website" in html_df.columns:
+
+        html_df["Website"] = html_df["Website"].apply(
+            lambda w: make_link(w, w)
+        )
+
+    if "Google Maps" in html_df.columns:
+
+        html_df["Google Maps"] = html_df["Google Maps"].apply(
+            lambda g: make_link(g, "Open in Maps")
+        )
+
+    for col in html_df.columns:
+
+        if col not in ("Website", "Google Maps"):
+
+            html_df[col] = (
+                html_df[col]
+                .fillna("")
+                .astype(str)
+                .apply(html_lib.escape)
+            )
+
+    table_html = html_df.to_html(
+        escape=False,
+        index=False,
+        classes="leads-table",
+        border=0
+    )
+
+    # Show every row on this same page (no internal scroll
+    # cutting results short). Height grows with the number of
+    # rows, capped so extremely large tables still scroll the
+    # normal page instead of becoming unusably tall.
+    table_height = min(
+        (len(filtered_df) + 1) * 40 + 40,
+        2000
+    )
+
+    st.markdown(
+        f"""
+        <style>
+        .leads-table-wrap {{
+            max-height: {table_height}px;
+            overflow: auto;
+            border: 1px solid rgba(250, 250, 250, 0.2);
+            border-radius: 6px;
+        }}
+        table.leads-table {{
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+            white-space: nowrap;
+        }}
+        table.leads-table thead th {{
+            position: sticky;
+            top: 0;
+            background: #0e1117;
+            color: #fafafa;
+            text-align: left;
+            padding: 8px 12px;
+            border-bottom: 1px solid rgba(250, 250, 250, 0.3);
+            z-index: 1;
+        }}
+        table.leads-table tbody td {{
+            padding: 8px 12px;
+            border-bottom: 1px solid rgba(250, 250, 250, 0.1);
+            color: #fafafa;
+        }}
+        table.leads-table tbody tr:hover {{
+            background: rgba(250, 250, 250, 0.05);
+        }}
+        table.leads-table a {{
+            color: #4dabf7;
+            text-decoration: underline;
+        }}
+        </style>
+        <div class="leads-table-wrap">
+            {table_html}
+        </div>
+        """,
+        unsafe_allow_html=True
     )
 
     output = BytesIO()
