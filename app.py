@@ -615,145 +615,23 @@ if not st.session_state["leads"].empty:
         2000
     )
 
-    # Build a clickable HTML version of the table (Website and
-    # Google Maps become real <a> links that open in a new tab).
-    # st.dataframe's LinkColumn depends on the Streamlit version
-    # installed, so this HTML table is used instead — it works
-    # the same way everywhere.
-
-    import html as html_lib
-
-    def make_link(url, link_text):
-
-        if (
-            not url
-            or str(url).strip().upper() == "NO WEBSITE"
-        ):
-            return "NO WEBSITE"
-
-        safe_url = html_lib.escape(
-            str(url),
-            quote=True
-        )
-
-        safe_text = html_lib.escape(
-            str(link_text)
-        )
-
-        return (
-            f'<a href="{safe_url}" target="_blank" '
-            f'rel="noopener noreferrer">{safe_text}</a>'
-        )
-
-    html_df = filtered_df.copy()
-
-    if "Website" in html_df.columns:
-
-        html_df["Website"] = html_df["Website"].apply(
-            lambda w: make_link(w, w)
-        )
-
-    if "Google Maps" in html_df.columns:
-
-        html_df["Google Maps"] = html_df["Google Maps"].apply(
-            lambda g: make_link(g, "Open in Maps")
-        )
-
-    for col in html_df.columns:
-
-        if col not in ("Website", "Google Maps"):
-
-            html_df[col] = (
-                html_df[col]
-                .fillna("")
-                .astype(str)
-                .apply(html_lib.escape)
+    st.dataframe(
+        filtered_df,
+        use_container_width=True,
+        hide_index=True,
+        height=table_height,
+        column_config={
+            "Website": st.column_config.LinkColumn(
+                "Website",
+                display_text="Visit Website",
+                help="Click to open the business website in a new tab"
+            ),
+            "Google Maps": st.column_config.LinkColumn(
+                "Google Maps",
+                display_text="Open in Maps",
+                help="Click to open this business on Google Maps"
             )
-
-    table_html = html_df.to_html(
-        escape=False,
-        index=False,
-        classes="leads-table",
-        border=0
-    )
-
-    # Show every row on this same page (no internal scroll
-    # cutting results short). Height grows with the number of
-    # rows, capped so extremely large tables still scroll the
-    # normal page instead of becoming unusably tall.
-    table_height = min(
-        (len(filtered_df) + 1) * 40 + 40,
-        2000
-    )
-
-    # NOTE: every line below starts at column 0 (no leading
-    # spaces) on purpose. If this HTML/CSS block is indented
-    # (e.g. because it lives inside nested if-blocks), Streamlit's
-    # markdown parser treats any line starting with 4+ spaces as
-    # an indented CODE BLOCK, not HTML. That was the original bug:
-    # the <style> and wrapper <div>/<table> tags were showing up
-    # as literal escaped text instead of being rendered, while the
-    # unindented {table_html} content (from pandas to_html) still
-    # rendered as raw HTML but with zero styling/columns.
-
-    leads_table_css = """
-<style>
-.leads-table-wrap {
-    max-height: TABLE_HEIGHTpx;
-    overflow: auto;
-    border: 1px solid rgba(250, 250, 250, 0.2);
-    border-radius: 6px;
-}
-table.leads-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 14px;
-    white-space: nowrap;
-}
-table.leads-table thead th {
-    position: sticky;
-    top: 0;
-    background: #0e1117;
-    color: #fafafa;
-    text-align: left;
-    padding: 8px 12px;
-    border-bottom: 1px solid rgba(250, 250, 250, 0.3);
-    z-index: 1;
-}
-table.leads-table tbody td {
-    padding: 8px 12px;
-    border-bottom: 1px solid rgba(250, 250, 250, 0.1);
-    border-right: 1px solid rgba(250, 250, 250, 0.08);
-    color: #fafafa;
-}
-table.leads-table tbody tr:hover {
-    background: rgba(250, 250, 250, 0.05);
-}
-table.leads-table a {
-    color: #4dabf7;
-    text-decoration: underline;
-}
-</style>
-""".replace("TABLE_HEIGHT", str(table_height))
-
-    # Also strip any leading whitespace from every line of the
-    # generated table HTML itself (pandas' to_html indents nested
-    # tags), so nothing inside it can re-trigger the same
-    # indented-code-block markdown rule.
-    flat_table_html = "\n".join(
-        line.lstrip() for line in table_html.split("\n")
-    )
-
-    full_html = (
-        leads_table_css
-        + '<div class="leads-table-wrap">\n'
-        + flat_table_html
-        + "\n</div>"
-    )
-
-    st.markdown(
-        full_html,
-        unsafe_allow_html=True
+        }
     )
 
     output = BytesIO()

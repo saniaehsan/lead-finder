@@ -90,6 +90,16 @@ def search_google_maps(
             ""
         )
 
+        # Make sure the website is a full, absolute URL
+        # (http:// or https://). Streamlit's LinkColumn only
+        # turns a cell into a clickable link when the value
+        # starts with a valid scheme, so a bare domain like
+        # "example.com" would otherwise show as plain text.
+        if website and not website.lower().startswith(
+            ("http://", "https://")
+        ):
+            website = f"https://{website}"
+
         phone = place.get(
             "internationalPhoneNumber",
             ""
