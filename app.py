@@ -615,14 +615,49 @@ if not st.session_state["leads"].empty:
         2000
     )
 
+    # Rebuild the Google Maps link for every row so previously
+    # saved leads (old/broken links) also open the right place.
+    filtered_df = filtered_df.copy()
+    filtered_df["Google Maps"] = [
+        scraper.build_maps_link(pid, nm, addr)
+        for pid, nm, addr in zip(
+            filtered_df["Place ID"],
+            filtered_df["Business Name"],
+            filtered_df["Address"]
+        )
+    ]
+
+    # Streamlit's LinkColumn styles EVERY cell as a link, even
+    # the text "NO WEBSITE". So the Website column is shown as
+    # plain text, and a separate "Open Website" column holds the
+    # clickable link (empty when there is no website).
+    display_df = filtered_df.copy()
+
+    website_col_pos = list(display_df.columns).index("Website") + 1
+
+    display_df.insert(
+        website_col_pos,
+        "Open Website",
+        display_df["Website"].where(
+            display_df["Website"].astype(str).str.lower().str.startswith(
+                ("http://", "https://")
+            ),
+            None
+        )
+    )
+
     st.dataframe(
-        filtered_df,
+        display_df,
         use_container_width=True,
         hide_index=True,
         height=table_height,
         column_config={
-            "Website": st.column_config.LinkColumn(
-                "Website",
+            "Website": st.column_config.TextColumn(
+                "Website"
+            ),
+            "Open Website": st.column_config.LinkColumn(
+                "Open Website",
+                display_text="Open Website",
                 help="Click to open the business website in a new tab"
             ),
             "Google Maps": st.column_config.LinkColumn(
@@ -645,6 +680,29 @@ if not st.session_state["leads"].empty:
             index=False,
             sheet_name="Leads"
         )
+
+        # Make Google Maps / Website cells clickable in Excel too
+        ws = writer.sheets["Leads"]
+        headers = [c.value for c in ws[1]]
+
+        for col_name, label in (
+            ("Google Maps", "Open in Maps"),
+            ("Website", None)
+        ):
+            if col_name not in headers:
+                continue
+
+            col_idx = headers.index(col_name) + 1
+
+            for row in range(2, ws.max_row + 1):
+                cell = ws.cell(row=row, column=col_idx)
+                url = str(cell.value or "")
+
+                if url.lower().startswith(("http://", "https://")):
+                    cell.hyperlink = url
+                    if label:
+                        cell.value = label
+                    cell.style = "Hyperlink"
 
     st.download_button(
         label="EXPORT LEADS TO EXCEL",

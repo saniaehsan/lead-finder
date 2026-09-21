@@ -1,4 +1,23 @@
 import requests
+from urllib.parse import quote_plus
+
+
+def build_maps_link(place_id, name="", address=""):
+    """Official Google Maps URL that opens this exact place.
+
+    Google's Maps URL API requires the `query` parameter;
+    `query_place_id` alone is not enough. Passing the business
+    name + address as `query` and the Place ID as
+    `query_place_id` opens the correct location page.
+    """
+    query = quote_plus(f"{name} {address}".strip() or "place")
+    link = (
+        "https://www.google.com/maps/search/"
+        f"?api=1&query={query}"
+    )
+    if place_id:
+        link += f"&query_place_id={quote_plus(str(place_id))}"
+    return link
 
 
 # ============================================================
@@ -114,9 +133,10 @@ def search_google_maps(
         if only_no_website and website:
             continue
 
-        google_maps_link = (
-            "https://www.google.com/maps/search/"
-            f"?api=1&query_place_id={place_id}"
+        google_maps_link = build_maps_link(
+            place_id,
+            name,
+            address
         )
 
         leads.append({
