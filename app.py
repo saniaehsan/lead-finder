@@ -686,48 +686,73 @@ if not st.session_state["leads"].empty:
         2000
     )
 
+    # NOTE: every line below starts at column 0 (no leading
+    # spaces) on purpose. If this HTML/CSS block is indented
+    # (e.g. because it lives inside nested if-blocks), Streamlit's
+    # markdown parser treats any line starting with 4+ spaces as
+    # an indented CODE BLOCK, not HTML. That was the original bug:
+    # the <style> and wrapper <div>/<table> tags were showing up
+    # as literal escaped text instead of being rendered, while the
+    # unindented {table_html} content (from pandas to_html) still
+    # rendered as raw HTML but with zero styling/columns.
+
+    leads_table_css = """
+<style>
+.leads-table-wrap {
+    max-height: TABLE_HEIGHTpx;
+    overflow: auto;
+    border: 1px solid rgba(250, 250, 250, 0.2);
+    border-radius: 6px;
+}
+table.leads-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+    white-space: nowrap;
+}
+table.leads-table thead th {
+    position: sticky;
+    top: 0;
+    background: #0e1117;
+    color: #fafafa;
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid rgba(250, 250, 250, 0.3);
+    z-index: 1;
+}
+table.leads-table tbody td {
+    padding: 8px 12px;
+    border-bottom: 1px solid rgba(250, 250, 250, 0.1);
+    border-right: 1px solid rgba(250, 250, 250, 0.08);
+    color: #fafafa;
+}
+table.leads-table tbody tr:hover {
+    background: rgba(250, 250, 250, 0.05);
+}
+table.leads-table a {
+    color: #4dabf7;
+    text-decoration: underline;
+}
+</style>
+""".replace("TABLE_HEIGHT", str(table_height))
+
+    # Also strip any leading whitespace from every line of the
+    # generated table HTML itself (pandas' to_html indents nested
+    # tags), so nothing inside it can re-trigger the same
+    # indented-code-block markdown rule.
+    flat_table_html = "\n".join(
+        line.lstrip() for line in table_html.split("\n")
+    )
+
+    full_html = (
+        leads_table_css
+        + '<div class="leads-table-wrap">\n'
+        + flat_table_html
+        + "\n</div>"
+    )
+
     st.markdown(
-        f"""
-        <style>
-        .leads-table-wrap {{
-            max-height: {table_height}px;
-            overflow: auto;
-            border: 1px solid rgba(250, 250, 250, 0.2);
-            border-radius: 6px;
-        }}
-        table.leads-table {{
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 14px;
-            white-space: nowrap;
-        }}
-        table.leads-table thead th {{
-            position: sticky;
-            top: 0;
-            background: #0e1117;
-            color: #fafafa;
-            text-align: left;
-            padding: 8px 12px;
-            border-bottom: 1px solid rgba(250, 250, 250, 0.3);
-            z-index: 1;
-        }}
-        table.leads-table tbody td {{
-            padding: 8px 12px;
-            border-bottom: 1px solid rgba(250, 250, 250, 0.1);
-            color: #fafafa;
-        }}
-        table.leads-table tbody tr:hover {{
-            background: rgba(250, 250, 250, 0.05);
-        }}
-        table.leads-table a {{
-            color: #4dabf7;
-            text-decoration: underline;
-        }}
-        </style>
-        <div class="leads-table-wrap">
-            {table_html}
-        </div>
-        """,
+        full_html,
         unsafe_allow_html=True
     )
 
