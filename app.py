@@ -623,7 +623,6 @@ if not st.session_state["leads"].empty:
         column_config={
             "Website": st.column_config.LinkColumn(
                 "Website",
-                display_text="Visit Website",
                 help="Click to open the business website in a new tab"
             ),
             "Google Maps": st.column_config.LinkColumn(
