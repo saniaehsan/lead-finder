@@ -662,6 +662,16 @@ if not st.session_state["leads"].empty:
             "Reviews": st.column_config.TextColumn(
                 "Reviews"
             ),
+            "Nearby Competitors": st.column_config.TextColumn(
+                "Nearby Competitors",
+                width="large"
+            ),
+            "Competitors With Well-Designed Websites": (
+                st.column_config.TextColumn(
+                    "Competitors With Well-Designed Websites",
+                    width="large"
+                )
+            ),
             "Open Website": st.column_config.LinkColumn(
                 "Open Website",
                 display_text="Open Website",
