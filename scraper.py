@@ -1,10 +1,6 @@
 import html
-import json
 import math
-import os
 import re
-import threading
-from datetime import date
 from concurrent.futures import ThreadPoolExecutor
 import requests
 from urllib.parse import quote_plus, unquote, urlparse
@@ -284,206 +280,6 @@ def add_competitor_columns(
 
 
 # ============================================================
-# OWNER FINDER
-# ============================================================
-# Step 1: look for "<Name>, owner" / "owner <Name>" style phrases
-#         in the (up to 5) Google reviews Places API returns.
-# Step 2: (optional, needs Custom Search API key + engine ID) search
-#         "<business>" <city> owner and read the result titles /
-#         snippets - these include BBB, Yelp, Facebook, Angi,
-#         license directories etc. without scraping those sites.
-# Results are best-effort: always verify before outreach.
-
-_ROLES = (
-    r"(?i:co-owner|owner|founder|president|principal|general manager|"
-    r"manager|operator|master plumber|ceo)"
-)
-
-# 1-3 capitalised words, e.g. "Mike", "Mike Smith", "Mike J. Smith"
-_NAME = r"([A-Z][a-z]{1,15}(?:\s[A-Z]\.)?(?:\s[A-Z][a-z]{1,20})?)"
-
-_PAT_NAME_THEN_ROLE = re.compile(
-    _NAME + r"\s*(?:,|-|\u2013|\()?\s*(?:is\s+)?(?:the\s+|our\s+)?("
-    + _ROLES + r")\b"
-)
-_PAT_ROLE_THEN_NAME = re.compile(
-    r"\b(" + _ROLES + r")\s*(?:is|:|,|-|\u2013)?\s*" + _NAME
-)
-
-_NOT_NAMES = {
-    "The", "Our", "Great", "Very", "Best", "Good", "Highly", "Super",
-    "Friendly", "Professional", "Awesome", "Amazing", "Excellent",
-    "Family", "Local", "Small", "New", "Real", "Business", "Company",
-    "Plumbing", "Service", "Services", "Manager", "Owner", "Customer",
-    "Contact", "About", "Meet", "And", "But", "Also", "Thanks", "Thank",
-    "Plumber", "Plumbers", "Master", "General", "Called", "Call",
-    "Got", "Had", "Was", "Were", "His", "Her", "Their", "This", "That",
-    "Facebook", "Yelp", "Angi", "Bbb", "Google", "Reviews", "Review"
-}
-
-
-def _clean_name(name, business_name=""):
-    name = (name or "").strip(" .,-")
-    parts = name.split()
-
-    if not parts or parts[0] in _NOT_NAMES:
-        return ""
-
-    if any(p in _NOT_NAMES for p in parts):
-        return ""
-
-    # Skip if it is just part of the business name itself
-    biz = (business_name or "").lower()
-    if biz and name.lower() in biz:
-        return ""
-
-    return name
-
-
-def owner_from_text(text, business_name=""):
-    """(name, role) found in a block of text, or ('', '')."""
-    text = html.unescape(text or "")
-
-    for m in _PAT_NAME_THEN_ROLE.finditer(text):
-        name = _clean_name(m.group(1), business_name)
-        if name:
-            return name, m.group(2).title()
-
-    for m in _PAT_ROLE_THEN_NAME.finditer(text):
-        name = _clean_name(m.group(2), business_name)
-        if name:
-            return name, m.group(1).title()
-
-    return "", ""
-
-
-def owner_from_reviews(reviews, business_name=""):
-    for review in reviews or []:
-        body = (
-            (review.get("text") or {}).get("text", "")
-            or (review.get("originalText") or {}).get("text", "")
-        )
-        name, role = owner_from_text(body, business_name)
-        if name:
-            return name, role, "Google review"
-    return "", "", ""
-
-
-# ---- Google Custom Search (Programmable Search Engine) ----------
-# Free: 100 queries/day per Cloud project. A small local counter
-# (search_usage.json) keeps us under the daily limit.
-
-USAGE_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "search_usage.json"
-)
-_usage_lock = threading.Lock()
-_quota_hit = {"day": "", "hit": False}
-
-
-def _take_search_slot(daily_limit):
-    """True if we may spend one more search today (and counts it)."""
-    today = date.today().isoformat()
-
-    with _usage_lock:
-        if _quota_hit["day"] == today and _quota_hit["hit"]:
-            return False
-
-        try:
-            with open(USAGE_FILE, "r", encoding="utf-8") as f:
-                usage = json.load(f)
-        except (OSError, ValueError):
-            usage = {}
-
-        if usage.get("date") != today:
-            usage = {"date": today, "count": 0}
-
-        if usage["count"] >= daily_limit:
-            return False
-
-        usage["count"] += 1
-
-        try:
-            with open(USAGE_FILE, "w", encoding="utf-8") as f:
-                json.dump(usage, f)
-        except OSError:
-            pass
-
-        return True
-
-
-def searches_used_today():
-    try:
-        with open(USAGE_FILE, "r", encoding="utf-8") as f:
-            usage = json.load(f)
-        if usage.get("date") == date.today().isoformat():
-            return int(usage.get("count", 0))
-    except (OSError, ValueError):
-        pass
-    return 0
-
-
-def owner_from_web(
-    business_name, area, cse_key, cse_cx, daily_limit=100, timeout=15
-):
-    """Google Custom Search: read result titles + snippets."""
-    if not cse_key or not cse_cx:
-        return "", "", ""
-
-    if not _take_search_slot(daily_limit):
-        return "", "", ""
-
-    try:
-        resp = requests.get(
-            "https://www.googleapis.com/customsearch/v1",
-            params={
-                "key": cse_key,
-                "cx": cse_cx,
-                "q": f'"{business_name}" {area} owner',
-                "num": 10,
-            },
-            timeout=timeout,
-        )
-    except requests.RequestException:
-        return "", "", ""
-
-    if resp.status_code in (403, 429):
-        # Quota used up / API not allowed: stop wasting calls today.
-        with _usage_lock:
-            _quota_hit["day"] = date.today().isoformat()
-            _quota_hit["hit"] = True
-        return "", "", ""
-
-    if resp.status_code != 200:
-        return "", "", ""
-
-    try:
-        items = resp.json().get("items", [])
-    except ValueError:
-        return "", "", ""
-
-    for item in items:
-        blob = f"{item.get('title', '')}. {item.get('snippet', '')}"
-        name, role = owner_from_text(blob, business_name)
-        if name:
-            domain = urlparse(item.get("link", "")).netloc.replace("www.", "")
-            return name, role, f"Web ({domain})"
-
-    return "", "", ""
-
-
-def find_owner(
-    business_name, reviews, area,
-    cse_key=None, cse_cx=None, daily_limit=100
-):
-    name, role, src = owner_from_reviews(reviews, business_name)
-    if name:
-        return name, role, src
-    return owner_from_web(
-        business_name, area, cse_key, cse_cx, daily_limit
-    )
-
-
-# ============================================================
 # GOOGLE PLACES SEARCH
 # ============================================================
 
@@ -492,12 +288,7 @@ def search_google_maps(
     business_type,
     location,
     only_no_website=False,
-    page_token=None,
-    find_owners=True,
-    cse_key=None,
-    cse_cx=None,
-    daily_limit=100,
-    area=""
+    page_token=None
 ):
 
     URL = "https://places.googleapis.com/v1/places:searchText"
@@ -555,7 +346,6 @@ def search_google_maps(
     result = response.json()
     places = result.get("places", [])
     leads = []
-    raw_reviews = []
 
     for place in places:
 
@@ -625,9 +415,6 @@ def search_google_maps(
             "Business Name": name,
             "Phone Number": phone,
             "Email": "",
-            "Owner Name": "",
-            "Owner Role": "",
-            "Owner Source": "",
             "Address": address,
             "Website": website if website else "NO WEBSITE",
             "Rating": rating,
@@ -637,7 +424,6 @@ def search_google_maps(
             "Latitude": loc.get("latitude"),
             "Longitude": loc.get("longitude")
         })
-        raw_reviews.append(place.get("reviews", []))
 
     # Look up emails on the business websites (in parallel for speed)
     sites = [
@@ -654,21 +440,6 @@ def search_google_maps(
                 lead["Email"] = "NO WEBSITE"
             else:
                 lead["Email"] = email if email else "NOT FOUND"
-
-    if find_owners and leads:
-        with ThreadPoolExecutor(max_workers=5) as pool:
-            owners = list(pool.map(
-                lambda args: find_owner(
-                    args[0]["Business Name"], args[1], area,
-                    cse_key, cse_cx, daily_limit
-                ),
-                zip(leads, raw_reviews)
-            ))
-
-        for lead, (o_name, o_role, o_src) in zip(leads, owners):
-            lead["Owner Name"] = o_name or "NOT FOUND"
-            lead["Owner Role"] = o_role
-            lead["Owner Source"] = o_src
 
     next_page_token = result.get("nextPageToken")
 
