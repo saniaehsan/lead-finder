@@ -1,0 +1,836 @@
+import json
+import os
+
+import streamlit as st
+import pandas as pd
+from io import BytesIO
+
+import scraper
+
+
+# ============================================================
+# PAGE SETTINGS
+# ============================================================
+
+st.set_page_config(
+    page_title="Google Maps Lead Finder",
+    layout="wide"
+)
+
+
+# ============================================================
+# SESSION STATE
+# ============================================================
+
+if "leads" not in st.session_state:
+    st.session_state["leads"] = pd.DataFrame()
+
+if "searches" not in st.session_state:
+    st.session_state["searches"] = []
+
+if "search_progress" not in st.session_state:
+    st.session_state["search_progress"] = {}
+
+
+# ============================================================
+# STATIC US GEO DATA (State -> County -> Cities / Landmarks)
+# ============================================================
+# This replaces the old live Census / Nominatim API lookups.
+# All data lives in us_geo_data.json, shipped alongside this file,
+# so State -> County -> City -> Location works instantly and
+# reliably without depending on outside APIs at runtime.
+
+GEO_DATA_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "us_geo_data.json"
+)
+
+
+@st.cache_data(show_spinner=False)
+def load_geo_data():
+
+    with open(GEO_DATA_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+GEO_DATA = load_geo_data()
+
+
+# ============================================================
+# TITLE
+# ============================================================
+
+st.title("Google Maps Lead Finder")
+
+st.write(
+    "Select Country → State → County → City → Location, "
+    "then search each Google Maps page one by one."
+)
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+with st.sidebar:
+
+    st.header("Google Maps API")
+
+    api_key = st.text_input(
+        "Enter Google Maps API Key",
+        type="password"
+    )
+
+    st.header("Yelp (optional)")
+
+    yelp_key = st.text_input(
+        "Enter Yelp Fusion API Key",
+        type="password",
+        help=(
+            "Adds Yelp listings to every search. Plumbers found "
+            "only on Yelp are matched on Google to get their website."
+        )
+    )
+
+    st.header("Social media")
+
+    deep_social = st.checkbox(
+        "Deep social check (slower)",
+        value=True,
+        help=(
+            "For businesses WITHOUT a website, searches the web for "
+            "their Facebook / Instagram page. Also tries to read "
+            "follower / like counts of the profiles found."
+        )
+    )
+
+
+# ============================================================
+# COUNTRY
+# ============================================================
+
+country = st.selectbox(
+    "Country",
+    ["United States"]
+)
+
+
+# ============================================================
+# STATE
+# ============================================================
+
+state_options = sorted(GEO_DATA.keys())
+
+state = st.selectbox(
+    "State",
+    ["Select State"] + state_options
+)
+
+
+# ============================================================
+# COUNTY
+# ============================================================
+
+if state == "Select State":
+
+    county_options = []
+
+else:
+
+    county_options = sorted(
+        GEO_DATA[state].keys()
+    )
+
+
+county = st.selectbox(
+    "County",
+    ["Select County"] + county_options
+)
+
+
+# ============================================================
+# CITY
+# ============================================================
+
+if (
+    state == "Select State"
+    or
+    county == "Select County"
+):
+
+    city_options = []
+
+else:
+
+    # County seat comes first (as stored in the data file),
+    # followed by the county's other major cities/towns.
+    city_options = GEO_DATA[state][county]["cities"]
+
+
+city = st.selectbox(
+    "City",
+    ["Select City"] + city_options
+)
+
+
+# ============================================================
+# LOCATION (landmarks + other areas/towns in the same county)
+# ============================================================
+
+if (
+    state == "Select State"
+    or
+    county == "Select County"
+    or
+    city == "Select City"
+):
+
+    location_options = []
+
+else:
+
+    county_info = GEO_DATA[state][county]
+
+    landmarks = county_info["landmarks"]
+
+    other_areas = [
+        c for c in county_info["cities"]
+        if c != city
+    ]
+
+    # Landmarks first, then any other towns/areas in the
+    # same county, with duplicates removed.
+    combined = landmarks + other_areas
+
+    seen = set()
+    location_options = []
+
+    for item in combined:
+        if item not in seen:
+            seen.add(item)
+            location_options.append(item)
+
+
+location_name = st.selectbox(
+    "Location",
+    ["Select Location"] + location_options
+)
+
+
+# ============================================================
+# BUSINESS TYPE
+# ============================================================
+
+business_options = [
+    "Restaurants",
+    "Dentists",
+    "Real Estate Agents",
+    "Plumbers",
+    "Electricians",
+    "Roofing Companies",
+    "Salons",
+    "Gyms",
+    "Hotels",
+    "Auto Repair Shops",
+    "Marketing Agencies",
+    "Lawyers"
+]
+
+business_type = st.selectbox(
+    "Business Type",
+    business_options,
+    index=business_options.index("Plumbers")
+)
+
+
+# ============================================================
+# RESULT FILTERS (applied to the saved results table below)
+# ============================================================
+
+col1, col2 = st.columns(2)
+
+with col1:
+
+    website_filter = st.selectbox(
+        "Website Filter",
+        [
+            "All",
+            "Only No Website",
+            "Only With Website"
+        ],
+        index=1   # default: "Only No Website"
+    )
+
+with col2:
+
+    phone_filter = st.checkbox(
+        "Only businesses with phone numbers",
+        value=True
+    )
+
+
+# ============================================================
+# BUILD SEARCH LOCATION
+# ============================================================
+
+if location_name != "Select Location":
+
+    location = (
+        f"{location_name}, "
+        f"{city}, "
+        f"{county}, "
+        f"{state}, "
+        f"{country}"
+    )
+
+else:
+
+    location = ""
+
+
+# ============================================================
+# SEARCH KEY
+# ============================================================
+
+search_key = (
+    f"{business_type}|"
+    f"{location_name}|"
+    f"{city}|"
+    f"{county}|"
+    f"{state}|"
+    f"{country}"
+)
+
+
+# ============================================================
+# SEARCH BUTTON
+# ============================================================
+
+if st.button(
+    "SEARCH LEADS",
+    use_container_width=True
+):
+
+    if not api_key:
+
+        st.error(
+            "Please enter your Google Maps API Key."
+        )
+
+    elif state == "Select State":
+
+        st.error(
+            "Please select a State."
+        )
+
+    elif county == "Select County":
+
+        st.error(
+            "Please select a County."
+        )
+
+    elif city == "Select City":
+
+        st.error(
+            "Please select a City."
+        )
+
+    elif location_name == "Select Location":
+
+        st.error(
+            "Please select a Location."
+        )
+
+    else:
+
+        progress = (
+            st.session_state["search_progress"]
+            .get(search_key, {})
+        )
+
+        if progress.get("completed", False):
+
+            st.success(
+                f"SUCCESS! All available results for "
+                f"{location_name}, {city} have already "
+                f"been searched."
+            )
+
+            st.info(
+                "Please select another Location."
+            )
+
+        else:
+
+            page_token = progress.get(
+                "page_token",
+                None
+            )
+
+            page_number = progress.get(
+                "page_number",
+                1
+            )
+
+            st.info(
+                f"Searching {business_type} in "
+                f"{location_name}, {city}, {county}, "
+                f"{state}..."
+            )
+
+            st.caption(
+                f"Page {page_number}"
+            )
+
+            with st.spinner(
+                f"Searching from Page {page_number} (no-website businesses only)..."
+            ):
+
+                result = scraper.search_all_sources(
+                    api_key=api_key,
+                    business_type=business_type,
+                    location=location,
+                    yelp_key=yelp_key,
+                    google_token=page_token,
+                    google_done=progress.get("google_done", False),
+                    yelp_offset=progress.get("yelp_offset", 0),
+                    deep_social=deep_social,
+                    only_no_website=True,
+                    min_leads=10,
+                    max_pages=5
+                )
+
+                for warning in result.get("warnings", []):
+                    st.warning(warning)
+
+                if result.get("success", False):
+                    st.caption(
+                        f"Read {result.get('pages_read', 0)} page(s), "
+                        f"checked {result.get('businesses_checked', 0)} "
+                        f"businesses, kept only those with NO website."
+                    )
+
+            if not result.get("success", False):
+
+                st.error(
+                    "Google Maps API Error"
+                )
+
+                st.code(
+                    result.get(
+                        "error",
+                        "Unknown error"
+                    )
+                )
+
+            else:
+
+                leads = result.get(
+                    "leads",
+                    []
+                )
+
+                if leads:
+
+                    new_df = pd.DataFrame(
+                        leads
+                    )
+
+                    new_df[
+                        "Search Country"
+                    ] = country
+
+                    new_df[
+                        "Search State"
+                    ] = state
+
+                    new_df[
+                        "Search County"
+                    ] = county
+
+                    new_df[
+                        "Search City"
+                    ] = city
+
+                    new_df[
+                        "Location"
+                    ] = location_name
+
+                    new_df[
+                        "Business Type"
+                    ] = business_type
+
+                    if (
+                        st.session_state[
+                            "leads"
+                        ].empty
+                    ):
+
+                        combined_df = (
+                            new_df.copy()
+                        )
+
+                    else:
+
+                        combined_df = pd.concat(
+                            [
+                                st.session_state[
+                                    "leads"
+                                ],
+                                new_df
+                            ],
+                            ignore_index=True
+                        )
+
+                    if (
+                        "Place ID"
+                        in combined_df.columns
+                    ):
+
+                        combined_df = (
+                            combined_df
+                            .drop_duplicates(
+                                subset=["Place ID"],
+                                keep="first"
+                            )
+                            .reset_index(
+                                drop=True
+                            )
+                        )
+
+                    st.session_state[
+                        "leads"
+                    ] = combined_df
+
+                    st.success(
+                        f"Page {page_number}: "
+                        f"{len(leads)} new lead(s) found. "
+                        f"Total saved leads: "
+                        f"{len(combined_df)}"
+                    )
+
+                else:
+
+                    st.warning(
+                        f"Page {page_number}: "
+                        f"No matching leads found "
+                        f"on this page."
+                    )
+
+                search_text = (
+                    f"{business_type} | "
+                    f"{location_name}, {city}, "
+                    f"{county}, {state}"
+                )
+
+                if (
+                    search_text
+                    not in st.session_state[
+                        "searches"
+                    ]
+                ):
+
+                    st.session_state[
+                        "searches"
+                    ].append(
+                        search_text
+                    )
+
+                next_page_token = result.get(
+                    "next_page_token"
+                )
+
+                if result.get("has_more_pages"):
+
+                    st.session_state[
+                        "search_progress"
+                    ][search_key] = {
+
+                        "page_token":
+                            next_page_token,
+
+                        "google_done":
+                            result.get("google_done", False),
+
+                        "yelp_offset":
+                            result.get("yelp_next_offset"),
+
+                        "page_number":
+                            page_number + 1,
+
+                        "completed":
+                            False
+                    }
+
+                    st.info(
+                        f"More Google Maps results are "
+                        f"available. Click SEARCH LEADS "
+                        f"again for Page "
+                        f"{page_number + 1}."
+                    )
+
+                else:
+
+                    st.session_state[
+                        "search_progress"
+                    ][search_key] = {
+
+                        "page_token":
+                            None,
+
+                        "page_number":
+                            page_number,
+
+                        "completed":
+                            True
+                    }
+
+                    st.success(
+                        f"SUCCESS! All available Google "
+                        f"Maps pages for {location_name}, "
+                        f"{city} have been searched."
+                    )
+
+                    st.info(
+                        "Please select another Location "
+                        "to continue finding leads."
+                    )
+
+
+# ============================================================
+# SHOW SAVED RESULTS
+# ============================================================
+
+if not st.session_state["leads"].empty:
+
+    df = (
+        st.session_state["leads"]
+        .copy()
+    )
+
+    # Competitors are calculated from ALL saved leads (before the
+    # filters below), so filtering does not remove competitors.
+    df = scraper.add_competitor_columns(df)
+
+    st.divider()
+
+    st.subheader(
+        f"Saved Results "
+        f"({len(df)} Total Leads)"
+    )
+
+    filtered_df = df.copy()
+
+    if website_filter == "Only No Website":
+
+        filtered_df = filtered_df[
+            filtered_df["Website"]
+            .fillna("")
+            .astype(str)
+            .str.upper()
+            == "NO WEBSITE"
+        ]
+
+    elif website_filter == "Only With Website":
+
+        filtered_df = filtered_df[
+            filtered_df["Website"]
+            .fillna("")
+            .astype(str)
+            .str.upper()
+            != "NO WEBSITE"
+        ]
+
+    if phone_filter:
+
+        filtered_df = filtered_df[
+            filtered_df["Phone Number"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            != ""
+        ]
+
+    st.info(
+        f"{len(filtered_df)} leads "
+        f"currently shown."
+    )
+
+    # Show every row on this same page (no internal scroll
+    # cutting results short). Height grows with the number of
+    # rows, capped so extremely large tables still scroll the
+    # normal page instead of becoming unusably tall.
+    table_height = min(
+        (len(filtered_df) + 1) * 35 + 3,
+        2000
+    )
+
+    # Rebuild the Google Maps link for every row so previously
+    # saved leads (old/broken links) also open the right place.
+    filtered_df = filtered_df.copy()
+    filtered_df["Google Maps"] = [
+        scraper.build_maps_link(pid, nm, addr)
+        for pid, nm, addr in zip(
+            filtered_df["Place ID"],
+            filtered_df["Business Name"],
+            filtered_df["Address"]
+        )
+    ]
+
+    # Streamlit's LinkColumn styles EVERY cell as a link, even
+    # the text "NO WEBSITE". So the Website column is shown as
+    # plain text, and a separate "Open Website" column holds the
+    # clickable link (empty when there is no website).
+    # Latitude / Longitude are only used for distance maths.
+    filtered_df = filtered_df.drop(
+        columns=["Latitude", "Longitude"],
+        errors="ignore"
+    )
+
+    display_df = filtered_df.copy()
+
+    website_col_pos = list(display_df.columns).index("Website") + 1
+
+    display_df.insert(
+        website_col_pos,
+        "Open Website",
+        display_df["Website"].where(
+            display_df["Website"].astype(str).str.lower().str.startswith(
+                ("http://", "https://")
+            ),
+            None
+        )
+    )
+
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+        height=table_height,
+        column_config={
+            "Website": st.column_config.TextColumn(
+                "Website"
+            ),
+            "Email": st.column_config.TextColumn(
+                "Email",
+                width="medium"
+            ),
+            "Social Media Presence": st.column_config.TextColumn(
+                "Social Media Presence",
+                width="large"
+            ),
+            "Review Quality / Service Issues": st.column_config.TextColumn(
+                "Review Quality / Service Issues",
+                width="large"
+            ),
+            "Social Presence Score": st.column_config.TextColumn(
+                "Social Presence Score"
+            ),
+            "Listed On": st.column_config.TextColumn(
+                "Listed On"
+            ),
+            "Yelp URL": st.column_config.LinkColumn(
+                "Yelp",
+                display_text="Open Yelp",
+                help="Click to open this business on Yelp"
+            ),
+            "Rating": st.column_config.NumberColumn(
+                "Rating",
+                format="%.1f"
+            ),
+            "Reviews": st.column_config.TextColumn(
+                "Reviews"
+            ),
+            "Nearby Competitors": st.column_config.TextColumn(
+                "Nearby Competitors",
+                width="large"
+            ),
+            "Competitors With Well-Designed Websites":
+                st.column_config.LinkColumn(
+                    "Competitors With Well-Designed Websites",
+                    display_text=r"https?://(?:www\.)?([^/]+)",
+                    width="large",
+                    help="Click to open the competitor's website"
+                ),
+            "Open Website": st.column_config.LinkColumn(
+                "Open Website",
+                display_text="Open Website",
+                help="Click to open the business website in a new tab"
+            ),
+            "Google Maps": st.column_config.LinkColumn(
+                "Google Maps",
+                display_text="Open in Maps",
+                help="Click to open this business on Google Maps"
+            )
+        }
+    )
+
+    output = BytesIO()
+
+    with pd.ExcelWriter(
+        output,
+        engine="openpyxl"
+    ) as writer:
+
+        filtered_df.to_excel(
+            writer,
+            index=False,
+            sheet_name="Leads"
+        )
+
+        # Make Google Maps / Website cells clickable in Excel too
+        ws = writer.sheets["Leads"]
+        headers = [c.value for c in ws[1]]
+
+        for col_name, label in (
+            ("Google Maps", "Open in Maps"),
+            ("Yelp URL", "Open Yelp"),
+            ("Website", None),
+            ("Competitors With Well-Designed Websites", None)
+        ):
+            if col_name not in headers:
+                continue
+
+            col_idx = headers.index(col_name) + 1
+
+            for row in range(2, ws.max_row + 1):
+                cell = ws.cell(row=row, column=col_idx)
+                url = str(cell.value or "")
+
+                if url.lower().startswith(("http://", "https://")):
+                    cell.hyperlink = url
+                    if label:
+                        cell.value = label
+                    cell.style = "Hyperlink"
+
+    st.download_button(
+        label="EXPORT LEADS TO EXCEL",
+        data=output.getvalue(),
+        file_name=(
+            "Google_Maps_All_Saved_Leads.xlsx"
+        ),
+        mime=(
+            "application/vnd.openxmlformats-"
+            "officedocument.spreadsheetml.sheet"
+        ),
+        use_container_width=True
+    )
+
+    if st.button(
+        "CLEAR ALL SAVED RESULTS",
+        use_container_width=True
+    ):
+
+        st.session_state[
+            "leads"
+        ] = pd.DataFrame()
+
+        st.session_state[
+            "searches"
+        ] = []
+
+        st.session_state[
+            "search_progress"
+        ] = {}
+
+        st.rerun()
