@@ -81,6 +81,29 @@ with st.sidebar:
         type="password"
     )
 
+    st.header("Yelp (optional)")
+
+    yelp_key = st.text_input(
+        "Enter Yelp Fusion API Key",
+        type="password",
+        help=(
+            "Adds Yelp listings to every search. Plumbers found "
+            "only on Yelp are matched on Google to get their website."
+        )
+    )
+
+    st.header("Social media")
+
+    deep_social = st.checkbox(
+        "Deep social check (slower)",
+        value=False,
+        help=(
+            "For businesses WITHOUT a website, searches the web for "
+            "their Facebook / Instagram page. Also tries to read "
+            "follower / like counts of the profiles found."
+        )
+    )
+
 
 # ============================================================
 # COUNTRY
@@ -363,13 +386,19 @@ if st.button(
                 f"Searching Page {page_number}, finding emails..."
             ):
 
-                result = scraper.search_google_maps(
+                result = scraper.search_all_sources(
                     api_key=api_key,
                     business_type=business_type,
                     location=location,
-                    only_no_website=False,
-                    page_token=page_token
+                    yelp_key=yelp_key,
+                    google_token=page_token,
+                    google_done=progress.get("google_done", False),
+                    yelp_offset=progress.get("yelp_offset", 0),
+                    deep_social=deep_social
                 )
+
+                for warning in result.get("warnings", []):
+                    st.warning(warning)
 
             if not result.get("success", False):
 
@@ -501,7 +530,7 @@ if st.button(
                     "next_page_token"
                 )
 
-                if next_page_token:
+                if result.get("has_more_pages"):
 
                     st.session_state[
                         "search_progress"
@@ -509,6 +538,12 @@ if st.button(
 
                         "page_token":
                             next_page_token,
+
+                        "google_done":
+                            result.get("google_done", False),
+
+                        "yelp_offset":
+                            result.get("yelp_next_offset"),
 
                         "page_number":
                             page_number + 1,
@@ -678,6 +713,17 @@ if not st.session_state["leads"].empty:
                 "Review Quality / Service Issues",
                 width="large"
             ),
+            "Social Presence Score": st.column_config.TextColumn(
+                "Social Presence Score"
+            ),
+            "Listed On": st.column_config.TextColumn(
+                "Listed On"
+            ),
+            "Yelp URL": st.column_config.LinkColumn(
+                "Yelp",
+                display_text="Open Yelp",
+                help="Click to open this business on Yelp"
+            ),
             "Rating": st.column_config.NumberColumn(
                 "Rating",
                 format="%.1f"
@@ -728,6 +774,7 @@ if not st.session_state["leads"].empty:
 
         for col_name, label in (
             ("Google Maps", "Open in Maps"),
+            ("Yelp URL", "Open Yelp"),
             ("Website", None),
             ("Competitors With Well-Designed Websites", None)
         ):
