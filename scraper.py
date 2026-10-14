@@ -20,6 +20,43 @@ def build_maps_link(place_id, name="", address=""):
     return link
 
 
+def latest_review_years_ago(reviews):
+    """Age of the newest returned review, ONLY if it is in years.
+
+    Google gives text like "a year ago", "3 years ago",
+    "2 months ago", "a week ago". Only the "year" ones are kept;
+    months / weeks / days / hours are ignored (returns "").
+    """
+    newest_time = ""
+    newest_desc = ""
+
+    for review in reviews or []:
+        publish_time = review.get("publishTime", "") or ""
+        desc = review.get("relativePublishTimeDescription", "") or ""
+
+        if publish_time >= newest_time:
+            newest_time = publish_time
+            newest_desc = desc
+
+    if "year" in newest_desc.lower():
+        return newest_desc
+
+    return ""
+
+
+def format_reviews(count, reviews):
+    """'133' or '133 (2 years ago)' (years only)."""
+    if count is None or count == "":
+        return ""
+
+    years_ago = latest_review_years_ago(reviews)
+
+    if years_ago:
+        return f"{count} ({years_ago})"
+
+    return str(count)
+
+
 # ============================================================
 # GOOGLE PLACES SEARCH
 # ============================================================
@@ -44,6 +81,9 @@ def search_google_maps(
             "places.websiteUri,"
             "places.internationalPhoneNumber,"
             "places.nationalPhoneNumber,"
+            "places.rating,"
+            "places.userRatingCount,"
+            "places.reviews,"
             "nextPageToken"
         )
     }
@@ -130,6 +170,13 @@ def search_google_maps(
                 ""
             )
 
+        rating = place.get("rating", None)
+
+        reviews_text = format_reviews(
+            place.get("userRatingCount", None),
+            place.get("reviews", [])
+        )
+
         if only_no_website and website:
             continue
 
@@ -144,6 +191,8 @@ def search_google_maps(
             "Phone Number": phone,
             "Address": address,
             "Website": website if website else "NO WEBSITE",
+            "Rating": rating,
+            "Reviews": reviews_text,
             "Place ID": place_id,
             "Google Maps": google_maps_link
         })

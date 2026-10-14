@@ -655,6 +655,13 @@ if not st.session_state["leads"].empty:
             "Website": st.column_config.TextColumn(
                 "Website"
             ),
+            "Rating": st.column_config.NumberColumn(
+                "Rating",
+                format="%.1f"
+            ),
+            "Reviews": st.column_config.TextColumn(
+                "Reviews"
+            ),
             "Open Website": st.column_config.LinkColumn(
                 "Open Website",
                 display_text="Open Website",
