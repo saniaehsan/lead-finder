@@ -359,7 +359,7 @@ if st.button(
             )
 
             with st.spinner(
-                f"Searching Page {page_number}..."
+                f"Searching Page {page_number} and finding emails..."
             ):
 
                 result = scraper.search_google_maps(
@@ -664,6 +664,10 @@ if not st.session_state["leads"].empty:
         column_config={
             "Website": st.column_config.TextColumn(
                 "Website"
+            ),
+            "Email": st.column_config.TextColumn(
+                "Email",
+                width="medium"
             ),
             "Rating": st.column_config.NumberColumn(
                 "Rating",

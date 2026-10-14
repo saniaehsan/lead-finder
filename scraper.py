@@ -1,6 +1,9 @@
+import html
 import math
+import re
+from concurrent.futures import ThreadPoolExecutor
 import requests
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, unquote, urlparse
 
 
 def build_maps_link(place_id, name="", address=""):
@@ -56,6 +59,116 @@ def format_reviews(count, reviews):
         return f"{count} ({years_ago})"
 
     return str(count)
+
+
+# ============================================================
+# EMAIL FINDER (reads the business's own public website)
+# ============================================================
+# Google Places does NOT provide email addresses, so the email is
+# looked up on the business website: home page first, then the
+# usual contact/about pages. Only emails written publicly on the
+# site are collected.
+
+EMAIL_RE = re.compile(
+    r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
+)
+
+BAD_EMAIL_PARTS = (
+    "example.", "sentry", "wixpress", "domain.com", "email.com",
+    "yourdomain", "your-email", "yourname", "godaddy", "schema.org",
+    "w3.org", "noreply", "no-reply", "donotreply"
+)
+
+BAD_EMAIL_EXT = (
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".css", ".js"
+)
+
+CONTACT_PATHS = [
+    "", "/contact", "/contact-us", "/contact-us/",
+    "/about", "/about-us"
+]
+
+REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0 Safari/537.36"
+    )
+}
+
+
+def extract_emails(text):
+    """All plausible email addresses found in a chunk of HTML/text."""
+    text = html.unescape(unquote(text or ""))
+    found = []
+
+    for match in EMAIL_RE.findall(text):
+        email = match.strip(".").lower()
+
+        if email.endswith(BAD_EMAIL_EXT):
+            continue
+
+        if any(bad in email for bad in BAD_EMAIL_PARTS):
+            continue
+
+        if email not in found:
+            found.append(email)
+
+    return found
+
+
+def find_email(website, timeout=6):
+    """Best email found on a business website, or ''."""
+    if not website or not str(website).lower().startswith(
+        ("http://", "https://")
+    ):
+        return ""
+
+    parsed = urlparse(website)
+    root = f"{parsed.scheme}://{parsed.netloc}"
+    site_domain = parsed.netloc.lower()
+
+    if site_domain.startswith("www."):
+        site_domain = site_domain[4:]
+
+    candidates = []
+
+    for i, path in enumerate(CONTACT_PATHS):
+
+        url = website if path == "" else root + path
+
+        try:
+            response = requests.get(
+                url,
+                headers=REQUEST_HEADERS,
+                timeout=timeout,
+                allow_redirects=True
+            )
+        except requests.RequestException:
+            if i == 0:
+                # Home page unreachable -> don't waste time on the rest
+                return ""
+            continue
+
+        content_type = response.headers.get("Content-Type", "")
+
+        if response.status_code != 200 or "text" not in content_type:
+            continue
+
+        for email in extract_emails(response.text[:500000]):
+            if email not in candidates:
+                candidates.append(email)
+
+        # Prefer an email on the business's own domain
+        own = [
+            e for e in candidates
+            if e.split("@")[-1].endswith(site_domain)
+        ]
+
+        if own:
+            return own[0]
+
+    return candidates[0] if candidates else ""
 
 
 # ============================================================
@@ -300,6 +413,7 @@ def search_google_maps(
         leads.append({
             "Business Name": name,
             "Phone Number": phone,
+            "Email": "",
             "Address": address,
             "Website": website if website else "NO WEBSITE",
             "Rating": rating,
@@ -309,6 +423,22 @@ def search_google_maps(
             "Latitude": loc.get("latitude"),
             "Longitude": loc.get("longitude")
         })
+
+    # Look up emails on the business websites (in parallel for speed)
+    sites = [
+        lead["Website"] if lead["Website"] != "NO WEBSITE" else ""
+        for lead in leads
+    ]
+
+    if sites:
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            emails = list(pool.map(find_email, sites))
+
+        for lead, site, email in zip(leads, sites, emails):
+            if not site:
+                lead["Email"] = "NO WEBSITE"
+            else:
+                lead["Email"] = email if email else "NOT FOUND"
 
     next_page_token = result.get("nextPageToken")
 
