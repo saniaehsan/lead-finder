@@ -96,7 +96,7 @@ with st.sidebar:
 
     deep_social = st.checkbox(
         "Deep social check (slower)",
-        value=False,
+        value=True,
         help=(
             "For businesses WITHOUT a website, searches the web for "
             "their Facebook / Instagram page. Also tries to read "
@@ -383,7 +383,7 @@ if st.button(
             )
 
             with st.spinner(
-                f"Searching Page {page_number}, finding emails..."
+                f"Searching from Page {page_number} (no-website businesses only)..."
             ):
 
                 result = scraper.search_all_sources(
@@ -394,11 +394,21 @@ if st.button(
                     google_token=page_token,
                     google_done=progress.get("google_done", False),
                     yelp_offset=progress.get("yelp_offset", 0),
-                    deep_social=deep_social
+                    deep_social=deep_social,
+                    only_no_website=True,
+                    min_leads=10,
+                    max_pages=5
                 )
 
                 for warning in result.get("warnings", []):
                     st.warning(warning)
+
+                if result.get("success", False):
+                    st.caption(
+                        f"Read {result.get('pages_read', 0)} page(s), "
+                        f"checked {result.get('businesses_checked', 0)} "
+                        f"businesses, kept only those with NO website."
+                    )
 
             if not result.get("success", False):
 

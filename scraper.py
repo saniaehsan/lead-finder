@@ -988,21 +988,15 @@ def merge_yelp(api_key, google_leads, yelp_leads):
 
 
 # ============================================================
-# ALL SOURCES AT ONCE
+# ALL SOURCES AT ONCE (no-website focus)
 # ============================================================
 
-def search_all_sources(
-    api_key,
-    business_type,
-    location,
-    yelp_key="",
-    google_token=None,
-    google_done=False,
-    yelp_offset=0,
-    deep_social=False
+def _fetch_page(
+    api_key, business_type, location, yelp_key,
+    google_token, google_done, yelp_offset
 ):
-    """One 'page' = next Google page + next Yelp page, merged,
-    de-duplicated, then emails/socials looked up for every lead."""
+    """One raw page: next Google page + next Yelp page, merged and
+    de-duplicated. Nothing is scanned or filtered here."""
     warnings = []
     g_leads, g_token = [], None
     yelp_leads, y_next = [], None
@@ -1014,10 +1008,7 @@ def search_all_sources(
             page_token=google_token, enrich=False
         )
         if not g["success"]:
-            return {
-                "success": False, "error": g["error"],
-                "leads": [], "next_page_token": None
-            }
+            return {"success": False, "error": g["error"]}
         g_leads = g["leads"]
         g_token = g.get("next_page_token")
         g_done = not g_token
@@ -1030,11 +1021,7 @@ def search_all_sources(
         else:
             warnings.append(f"Yelp error: {y['error']}")
 
-    # Yelp is "finished" for pagination when it has no next offset.
     leads = merge_yelp(api_key, g_leads, yelp_leads) if yelp_leads else g_leads
-
-    # Emails / socials are looked up once, on the merged list.
-    enrich_leads(leads, deep_social, _city_hint(location))
 
     return {
         "success": True,
@@ -1044,4 +1031,86 @@ def search_all_sources(
         "google_done": g_done,
         "yelp_next_offset": y_next,
         "has_more_pages": bool(g_token) or y_next is not None
+    }
+
+
+def search_all_sources(
+    api_key,
+    business_type,
+    location,
+    yelp_key="",
+    google_token=None,
+    google_done=False,
+    yelp_offset=0,
+    deep_social=False,
+    only_no_website=True,
+    min_leads=10,
+    max_pages=5
+):
+    """Keeps fetching pages (Google + Yelp) until at least
+    `min_leads` matching leads are found, there are no more pages, or
+    `max_pages` pages were read in this one click.
+
+    With only_no_website=True, businesses that have a website are
+    dropped right after merging, so they are never scanned (fast) and
+    never saved. Email / social lookup runs only on the kept leads.
+    """
+    kept, warnings = [], []
+    seen_ids = set()
+    pages_read = 0
+    checked = 0
+    state = {
+        "next_page_token": google_token,
+        "google_done": google_done,
+        "yelp_next_offset": yelp_offset,
+        "has_more_pages": True
+    }
+
+    while pages_read < max_pages and state["has_more_pages"]:
+        page = _fetch_page(
+            api_key, business_type, location, yelp_key,
+            state["next_page_token"], state["google_done"],
+            state["yelp_next_offset"]
+        )
+
+        if not page["success"]:
+            if pages_read == 0:
+                return {
+                    "success": False, "error": page["error"],
+                    "leads": [], "next_page_token": None
+                }
+            warnings.append(f"Stopped early: {page['error']}")
+            break
+
+        pages_read += 1
+        warnings += page["warnings"]
+        checked += len(page["leads"])
+
+        for lead in page["leads"]:
+            if lead["Place ID"] in seen_ids:
+                continue
+            seen_ids.add(lead["Place ID"])
+            if only_no_website and lead["Website"] != "NO WEBSITE":
+                continue
+            kept.append(lead)
+
+        state = {
+            k: page[k] for k in (
+                "next_page_token", "google_done",
+                "yelp_next_offset", "has_more_pages"
+            )
+        }
+
+        if len(kept) >= min_leads:
+            break
+
+    enrich_leads(kept, deep_social, _city_hint(location))
+
+    return {
+        "success": True,
+        "leads": kept,
+        "warnings": warnings,
+        "pages_read": pages_read,
+        "businesses_checked": checked,
+        **state
     }
