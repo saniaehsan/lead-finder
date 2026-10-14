@@ -117,12 +117,70 @@ def extract_emails(text):
     return found
 
 
-def find_email(website, timeout=6):
-    """Best email found on a business website, or ''."""
+# ---- Social media links (found on the same website pages) ------
+
+SOCIAL_SITES = (
+    ("Facebook", ("facebook.com", "fb.com")),
+    ("Instagram", ("instagram.com",)),
+    ("X/Twitter", ("twitter.com", "x.com")),
+    ("LinkedIn", ("linkedin.com",)),
+    ("YouTube", ("youtube.com", "youtu.be")),
+    ("TikTok", ("tiktok.com",)),
+    ("Pinterest", ("pinterest.com",)),
+    ("Yelp", ("yelp.com",)),
+)
+
+SOCIAL_LINK_RE = re.compile(
+    r"https?://(?:[a-z0-9\-]+\.)*"
+    r"(?:facebook\.com|fb\.com|instagram\.com|twitter\.com|x\.com|"
+    r"linkedin\.com|youtube\.com|youtu\.be|tiktok\.com|"
+    r"pinterest\.com|yelp\.com)/[^\s\"'<>\\)\]]+",
+    re.I
+)
+
+# Share buttons, embeds, single posts, login pages etc. are not the
+# business's own profile.
+BAD_SOCIAL_PARTS = (
+    "sharer", "share", "intent/", "/plugins/", "/tr?", "dialog",
+    "embed", "watch", "login", "signup", "privacy", "policies",
+    "hashtag", "explore", "/p/", "/reel", "/status/", "/posts/",
+    "/videos/", "/photo", "/events/", "/groups/"
+)
+
+
+def extract_socials(text):
+    """{'Facebook': url, 'Instagram': url, ...} found in HTML/text."""
+    text = html.unescape(text or "").replace("\\/", "/")
+    found = {}
+
+    for match in SOCIAL_LINK_RE.findall(text):
+        url = match.split("?")[0].split("#")[0].rstrip("/.,;")
+        low = url.lower()
+
+        if any(bad in low for bad in BAD_SOCIAL_PARTS):
+            continue
+
+        host = urlparse(url).netloc.lower()
+
+        for platform, domains in SOCIAL_SITES:
+            if any(host == d or host.endswith("." + d) for d in domains):
+                found.setdefault(platform, url)
+                break
+
+    return found
+
+
+def format_socials(socials):
+    """'Facebook: https://... | Instagram: https://...'"""
+    return " | ".join(f"{p}: {u}" for p, u in socials.items())
+
+
+def scan_website(website, timeout=6):
+    """(email, socials_dict) found on a business website."""
     if not website or not str(website).lower().startswith(
         ("http://", "https://")
     ):
-        return ""
+        return "", {}
 
     parsed = urlparse(website)
     root = f"{parsed.scheme}://{parsed.netloc}"
@@ -132,6 +190,13 @@ def find_email(website, timeout=6):
         site_domain = site_domain[4:]
 
     candidates = []
+    socials = {}
+
+    def own_emails():
+        return [
+            e for e in candidates
+            if e.split("@")[-1].endswith(site_domain)
+        ]
 
     for i, path in enumerate(CONTACT_PATHS):
 
@@ -147,7 +212,7 @@ def find_email(website, timeout=6):
         except requests.RequestException:
             if i == 0:
                 # Home page unreachable -> don't waste time on the rest
-                return ""
+                return "", {}
             continue
 
         content_type = response.headers.get("Content-Type", "")
@@ -155,20 +220,109 @@ def find_email(website, timeout=6):
         if response.status_code != 200 or "text" not in content_type:
             continue
 
-        for email in extract_emails(response.text[:500000]):
+        page = response.text[:500000]
+
+        for email in extract_emails(page):
             if email not in candidates:
                 candidates.append(email)
 
-        # Prefer an email on the business's own domain
-        own = [
-            e for e in candidates
-            if e.split("@")[-1].endswith(site_domain)
-        ]
+        for platform, link in extract_socials(page).items():
+            socials.setdefault(platform, link)
 
-        if own:
-            return own[0]
+        # Stop early once both an own-domain email and a social
+        # link have been found.
+        if own_emails() and socials:
+            break
 
-    return candidates[0] if candidates else ""
+    own = own_emails()
+    email = own[0] if own else (candidates[0] if candidates else "")
+
+    return email, socials
+
+
+# ============================================================
+# REVIEW QUALITY / SERVICE ISSUES
+# ============================================================
+# Google Places returns at most 5 reviews per business, so the
+# "issues" part only reflects those recent reviews (low-rated ones).
+
+ISSUE_PATTERNS = (
+    ("Late / no-show", re.compile(
+        r"\b(?:late|no[- ]?show|never (?:showed|came|arrived)|"
+        r"(?:didn'?t|did not|never) (?:show|come|arrive)|"
+        r"waited|reschedul\w*|delay\w*)\b", re.I)),
+    ("Pricing / overcharging", re.compile(
+        r"\b(?:overcharg\w*|over[- ]?priced|rip(?:ped)?[- ]?off|"
+        r"too expensive|hidden fees?|extra charges?|scam\w*)\b", re.I)),
+    ("Poor communication / rude", re.compile(
+        r"\b(?:no response|never (?:called|responded|returned|answered)|"
+        r"(?:didn'?t|did not) (?:call|respond|return|answer)|"
+        r"unresponsive|ghost\w*|rude|unprofessional|"
+        r"disrespectful)\b", re.I)),
+    ("Poor work quality", re.compile(
+        r"\b(?:poor quality|shoddy|sloppy|botched|"
+        r"(?:not|never|wasn'?t) (?:fixed|repaired|resolved)|"
+        r"still (?:leak\w*|broken|not working)|"
+        r"had to (?:redo|call someone else|hire)|"
+        r"damage[d]?|made (?:it|things) worse)\b", re.I)),
+)
+
+
+def _review_text(review):
+    return (
+        (review.get("text") or {}).get("text", "")
+        or (review.get("originalText") or {}).get("text", "")
+        or ""
+    )
+
+
+def review_quality(rating, count, reviews):
+    """'Good (4.6★, 133 reviews) | Issues: Late / no-show (2 of 5 ...)'"""
+    try:
+        r = float(rating)
+    except (TypeError, ValueError):
+        return "NO RATING"
+
+    if r >= 4.5:
+        label = "Excellent"
+    elif r >= 4.0:
+        label = "Good"
+    elif r >= 3.5:
+        label = "Average"
+    else:
+        label = "Poor"
+
+    head = f"{label} ({r:.1f}\u2605"
+    if count not in (None, ""):
+        head += f", {count} reviews"
+    head += ")"
+
+    reviews = reviews or []
+
+    if not reviews:
+        return head + " | No review text available"
+
+    low = [
+        rv for rv in reviews
+        if (rv.get("rating") if rv.get("rating") is not None else 5) <= 3
+    ]
+
+    if not low:
+        return head + " | No issues in recent reviews"
+
+    issues = []
+    for rv in low:
+        text = _review_text(rv)
+        for name, pattern in ISSUE_PATTERNS:
+            if name not in issues and pattern.search(text):
+                issues.append(name)
+
+    ratio = f"{len(low)} of {len(reviews)} recent reviews \u22643\u2605"
+
+    if issues:
+        return f"{head} | Issues: {', '.join(issues)} ({ratio})"
+
+    return f"{head} | Low ratings, reason unclear ({ratio})"
 
 
 # ============================================================
@@ -415,10 +569,16 @@ def search_google_maps(
             "Business Name": name,
             "Phone Number": phone,
             "Email": "",
+            "Social Media Presence": "",
             "Address": address,
             "Website": website if website else "NO WEBSITE",
             "Rating": rating,
             "Reviews": reviews_text,
+            "Review Quality / Service Issues": review_quality(
+                rating,
+                place.get("userRatingCount", None),
+                place.get("reviews", [])
+            ),
             "Place ID": place_id,
             "Google Maps": google_maps_link,
             "Latitude": loc.get("latitude"),
@@ -433,13 +593,17 @@ def search_google_maps(
 
     if sites:
         with ThreadPoolExecutor(max_workers=10) as pool:
-            emails = list(pool.map(find_email, sites))
+            scans = list(pool.map(scan_website, sites))
 
-        for lead, site, email in zip(leads, sites, emails):
+        for lead, site, (email, socials) in zip(leads, sites, scans):
             if not site:
                 lead["Email"] = "NO WEBSITE"
+                lead["Social Media Presence"] = "NO WEBSITE"
             else:
                 lead["Email"] = email if email else "NOT FOUND"
+                lead["Social Media Presence"] = (
+                    format_socials(socials) or "NOT FOUND"
+                )
 
     next_page_token = result.get("nextPageToken")
 

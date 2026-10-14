@@ -670,6 +670,14 @@ if not st.session_state["leads"].empty:
                 "Email",
                 width="medium"
             ),
+            "Social Media Presence": st.column_config.TextColumn(
+                "Social Media Presence",
+                width="large"
+            ),
+            "Review Quality / Service Issues": st.column_config.TextColumn(
+                "Review Quality / Service Issues",
+                width="large"
+            ),
             "Rating": st.column_config.NumberColumn(
                 "Rating",
                 format="%.1f"
