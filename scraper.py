@@ -1,6 +1,10 @@
 import html
+import json
 import math
+import os
 import re
+import threading
+from datetime import date
 from concurrent.futures import ThreadPoolExecutor
 import requests
 from urllib.parse import quote_plus, unquote, urlparse
@@ -284,14 +288,14 @@ def add_competitor_columns(
 # ============================================================
 # Step 1: look for "<Name>, owner" / "owner <Name>" style phrases
 #         in the (up to 5) Google reviews Places API returns.
-# Step 2: (optional, needs a SerpAPI key) Google-search
+# Step 2: (optional, needs Custom Search API key + engine ID) search
 #         "<business>" <city> owner and read the result titles /
 #         snippets - these include BBB, Yelp, Facebook, Angi,
 #         license directories etc. without scraping those sites.
 # Results are best-effort: always verify before outreach.
 
 _ROLES = (
-    r"(?i:co-owner|owner|founder|president|general manager|"
+    r"(?i:co-owner|owner|founder|president|principal|general manager|"
     r"manager|operator|master plumber|ceo)"
 )
 
@@ -365,43 +369,119 @@ def owner_from_reviews(reviews, business_name=""):
     return "", "", ""
 
 
-def owner_from_web(business_name, area, serp_key, timeout=15):
-    """Search the web (SerpAPI) and read titles + snippets."""
-    if not serp_key:
+# ---- Google Custom Search (Programmable Search Engine) ----------
+# Free: 100 queries/day per Cloud project. A small local counter
+# (search_usage.json) keeps us under the daily limit.
+
+USAGE_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "search_usage.json"
+)
+_usage_lock = threading.Lock()
+_quota_hit = {"day": "", "hit": False}
+
+
+def _take_search_slot(daily_limit):
+    """True if we may spend one more search today (and counts it)."""
+    today = date.today().isoformat()
+
+    with _usage_lock:
+        if _quota_hit["day"] == today and _quota_hit["hit"]:
+            return False
+
+        try:
+            with open(USAGE_FILE, "r", encoding="utf-8") as f:
+                usage = json.load(f)
+        except (OSError, ValueError):
+            usage = {}
+
+        if usage.get("date") != today:
+            usage = {"date": today, "count": 0}
+
+        if usage["count"] >= daily_limit:
+            return False
+
+        usage["count"] += 1
+
+        try:
+            with open(USAGE_FILE, "w", encoding="utf-8") as f:
+                json.dump(usage, f)
+        except OSError:
+            pass
+
+        return True
+
+
+def searches_used_today():
+    try:
+        with open(USAGE_FILE, "r", encoding="utf-8") as f:
+            usage = json.load(f)
+        if usage.get("date") == date.today().isoformat():
+            return int(usage.get("count", 0))
+    except (OSError, ValueError):
+        pass
+    return 0
+
+
+def owner_from_web(
+    business_name, area, cse_key, cse_cx, daily_limit=100, timeout=15
+):
+    """Google Custom Search: read result titles + snippets."""
+    if not cse_key or not cse_cx:
+        return "", "", ""
+
+    if not _take_search_slot(daily_limit):
         return "", "", ""
 
     try:
         resp = requests.get(
-            "https://serpapi.com/search.json",
+            "https://www.googleapis.com/customsearch/v1",
             params={
-                "engine": "google",
+                "key": cse_key,
+                "cx": cse_cx,
                 "q": f'"{business_name}" {area} owner',
                 "num": 10,
-                "api_key": serp_key,
             },
             timeout=timeout,
         )
-        if resp.status_code != 200:
-            return "", "", ""
-        results = resp.json().get("organic_results", [])
-    except (requests.RequestException, ValueError):
+    except requests.RequestException:
         return "", "", ""
 
-    for r in results:
-        blob = f"{r.get('title', '')}. {r.get('snippet', '')}"
+    if resp.status_code in (403, 429):
+        # Quota used up / API not allowed: stop wasting calls today.
+        with _usage_lock:
+            _quota_hit["day"] = date.today().isoformat()
+            _quota_hit["hit"] = True
+        return "", "", ""
+
+    if resp.status_code != 200:
+        return "", "", ""
+
+    try:
+        items = resp.json().get("items", [])
+    except ValueError:
+        return "", "", ""
+
+    for item in items:
+        blob = f"{item.get('title', '')}. {item.get('snippet', '')}"
         name, role = owner_from_text(blob, business_name)
         if name:
-            domain = urlparse(r.get("link", "")).netloc.replace("www.", "")
+            domain = urlparse(item.get("link", "")).netloc.replace("www.", "")
             return name, role, f"Web ({domain})"
 
     return "", "", ""
 
 
-def find_owner(business_name, reviews, area, serp_key=None):
+def find_owner(
+    business_name, reviews, area,
+    cse_key=None, cse_cx=None, daily_limit=100
+):
     name, role, src = owner_from_reviews(reviews, business_name)
     if name:
         return name, role, src
-    return owner_from_web(business_name, area, serp_key)
+    return owner_from_web(
+        business_name, area, cse_key, cse_cx, daily_limit
+    )
+
 
 # ============================================================
 # GOOGLE PLACES SEARCH
@@ -414,7 +494,9 @@ def search_google_maps(
     only_no_website=False,
     page_token=None,
     find_owners=True,
-    serp_key=None,
+    cse_key=None,
+    cse_cx=None,
+    daily_limit=100,
     area=""
 ):
 
@@ -577,7 +659,8 @@ def search_google_maps(
         with ThreadPoolExecutor(max_workers=5) as pool:
             owners = list(pool.map(
                 lambda args: find_owner(
-                    args[0]["Business Name"], args[1], area, serp_key
+                    args[0]["Business Name"], args[1], area,
+                    cse_key, cse_cx, daily_limit
                 ),
                 zip(leads, raw_reviews)
             ))
