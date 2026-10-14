@@ -81,38 +81,6 @@ with st.sidebar:
         type="password"
     )
 
-    st.header("Owner Finder (optional)")
-
-    find_owner_on = st.checkbox(
-        "Find owner name & role",
-        value=True,
-        help="Step 1 scans Google reviews (free). Step 2 uses "
-             "Google Custom Search (needs Search Engine ID)."
-    )
-
-    cse_key_input = st.text_input(
-        "Custom Search API Key (blank = use Maps key above)",
-        type="password"
-    )
-
-    cse_cx = st.text_input(
-        "Search Engine ID (cx)",
-        help="From programmablesearchengine.google.com"
-    )
-
-    daily_limit = st.number_input(
-        "Max web searches per day",
-        min_value=0,
-        max_value=100,
-        value=100,
-        help="Free quota is 100/day. Counter resets every day."
-    )
-
-    st.caption(
-        f"Web searches used today: "
-        f"{scraper.searches_used_today()} / {int(daily_limit)}"
-    )
-
 
 # ============================================================
 # COUNTRY
@@ -267,7 +235,7 @@ with col1:
             "Only No Website",
             "Only With Website"
         ],
-        index=1   # default: "Only No Website"
+        index=1
     )
 
 with col2:
@@ -392,7 +360,7 @@ if st.button(
             )
 
             with st.spinner(
-                f"Searching Page {page_number}, finding emails and owners..."
+                f"Searching Page {page_number} and finding emails & owners..."
             ):
 
                 result = scraper.search_google_maps(
@@ -400,12 +368,7 @@ if st.button(
                     business_type=business_type,
                     location=location,
                     only_no_website=False,
-                    page_token=page_token,
-                    find_owners=find_owner_on,
-                    cse_key=(cse_key_input or api_key) or None,
-                    cse_cx=scraper.parse_cx(cse_cx) or None,
-                    daily_limit=int(daily_limit),
-                    area=f"{city}, {state}"
+                    page_token=page_token
                 )
 
             if not result.get("success", False):
@@ -422,16 +385,6 @@ if st.button(
                 )
 
             else:
-
-                if scraper.LAST_WEB_ERROR["msg"]:
-
-                    st.warning(
-                        "Owner web search failed. Google replied:"
-                    )
-
-                    st.code(scraper.LAST_WEB_ERROR["msg"])
-
-                    scraper.LAST_WEB_ERROR["msg"] = ""
 
                 leads = result.get(
                     "leads",
