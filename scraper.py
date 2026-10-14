@@ -1,9 +1,13 @@
 import html
+import json
 import math
+import os
 import re
+import threading
+from datetime import date
 from concurrent.futures import ThreadPoolExecutor
 import requests
-from urllib.parse import quote_plus, unquote, urljoin, urlparse
+from urllib.parse import quote_plus, unquote, urlparse
 
 
 def build_maps_link(place_id, name="", address=""):
@@ -97,51 +101,13 @@ REQUEST_HEADERS = {
 }
 
 
-CF_RE = re.compile(r'data-cfemail="([0-9a-fA-F]+)"')
-MAILTO_RE = re.compile(r"mailto:([^\"'?\s<>]+)", re.I)
-OBFUSCATED_RE = re.compile(
-    r"([A-Za-z0-9._%+\-]+)\s*[\[\(\{]\s*at\s*[\]\)\}]\s*"
-    r"([A-Za-z0-9.\-]+)\s*[\[\(\{]\s*dot\s*[\]\)\}]\s*([A-Za-z]{2,})",
-    re.I
-)
-
-
-def _decode_cloudflare(hexstr):
-    """Cloudflare 'email protection' -> real address."""
-    try:
-        key = int(hexstr[:2], 16)
-        return "".join(
-            chr(int(hexstr[i:i + 2], 16) ^ key)
-            for i in range(2, len(hexstr), 2)
-        )
-    except ValueError:
-        return ""
-
-
 def extract_emails(text):
-    """All plausible email addresses in HTML/text.
-
-    Order = most trustworthy first: mailto: links, Cloudflare-
-    protected emails, plain text emails, then "name [at] site [dot] com".
-    """
-    raw = html.unescape(text or "")
-    text = unquote(raw)
-    candidates = []
-
-    candidates += [unquote(m) for m in MAILTO_RE.findall(raw)]
-    candidates += [_decode_cloudflare(h) for h in CF_RE.findall(raw)]
-    candidates += EMAIL_RE.findall(text)
-    candidates += [
-        f"{a}@{b}.{c}" for a, b, c in OBFUSCATED_RE.findall(text)
-    ]
-
+    """All plausible email addresses found in a chunk of HTML/text."""
+    text = html.unescape(unquote(text or ""))
     found = []
 
-    for match in candidates:
+    for match in EMAIL_RE.findall(text):
         email = match.strip(".").lower()
-
-        if not EMAIL_RE.fullmatch(email):
-            continue
 
         if email.endswith(BAD_EMAIL_EXT):
             continue
@@ -186,6 +152,33 @@ BAD_SOCIAL_PARTS = (
 )
 
 
+def _normalize_social(url, platform):
+    """Cut a social URL down to the profile root (or None)."""
+    parsed = urlparse(url)
+    segs = [p for p in parsed.path.split("/") if p]
+
+    if not segs:
+        return None
+
+    if platform == "LinkedIn":
+        keep = 2
+    elif platform == "YouTube":
+        keep = 1 if segs[0].startswith("@") else 2
+    elif platform == "Yelp":
+        keep = 2
+    elif platform == "Facebook":
+        if segs[0] == "profile.php":
+            return None
+        keep = 3 if segs[0] == "pages" else 1
+    else:
+        keep = 1
+
+    if len(segs) < keep:
+        return None
+
+    return f"https://{parsed.netloc}/" + "/".join(segs[:keep])
+
+
 def extract_socials(text):
     """{'Facebook': url, 'Instagram': url, ...} found in HTML/text."""
     text = html.unescape(text or "").replace("\\/", "/")
@@ -202,54 +195,21 @@ def extract_socials(text):
 
         for platform, domains in SOCIAL_SITES:
             if any(host == d or host.endswith("." + d) for d in domains):
-                found.setdefault(platform, url)
+                clean = _normalize_social(url, platform)
+                if clean:
+                    found.setdefault(platform, clean)
                 break
 
     return found
 
 
-def format_socials(socials, stats=None):
-    """'Facebook: https://... (1.2K likes) | Instagram: https://...'"""
-    stats = stats or {}
-    return " | ".join(
-        f"{p}: {u}" + (f" ({stats[p]})" if stats.get(p) else "")
-        for p, u in socials.items()
-    )
-
-
-CONTACT_HINTS = (
-    "contact", "about", "quote", "schedule", "request", "team",
-    "book", "estimate", "reach"
-)
-HREF_RE = re.compile(r"href=[\"']([^\"'#]+)", re.I)
-MAX_PAGES = 8
-
-
-def _discover_pages(base_url, page, site_domain):
-    """Internal links on a page that look like contact/about pages."""
-    out = []
-    for href in HREF_RE.findall(page[:300000]):
-        if href.lower().startswith(("mailto:", "tel:", "javascript:")):
-            continue
-        full = urljoin(base_url, href)
-        p = urlparse(full)
-        host = p.netloc.lower().replace("www.", "", 1)
-        if host != site_domain:
-            continue
-        if any(h in p.path.lower() for h in CONTACT_HINTS):
-            clean = f"{p.scheme}://{p.netloc}{p.path}"
-            if clean not in out:
-                out.append(clean)
-    return out[:5]
+def format_socials(socials):
+    """'Facebook: https://... | Instagram: https://...'"""
+    return " | ".join(f"{p}: {u}" for p, u in socials.items())
 
 
 def scan_website(website, timeout=6):
-    """(emails, socials_dict) found on a business website.
-
-    Reads the home page, follows contact/about links found on it,
-    then falls back to the usual /contact style URLs. Up to 3 emails
-    are returned (business-domain emails first), joined by ' | '.
-    """
+    """(email, socials_dict) found on a business website."""
     if not website or not str(website).lower().startswith(
         ("http://", "https://")
     ):
@@ -271,16 +231,9 @@ def scan_website(website, timeout=6):
             if e.split("@")[-1].endswith(site_domain)
         ]
 
-    queue = [website]
-    seen = set()
-    fetched = 0
+    for i, path in enumerate(CONTACT_PATHS):
 
-    while queue and fetched < MAX_PAGES:
-        url = queue.pop(0)
-
-        if url.rstrip("/") in seen:
-            continue
-        seen.add(url.rstrip("/"))
+        url = website if path == "" else root + path
 
         try:
             response = requests.get(
@@ -290,12 +243,11 @@ def scan_website(website, timeout=6):
                 allow_redirects=True
             )
         except requests.RequestException:
-            if fetched == 0:
+            if i == 0:
                 # Home page unreachable -> don't waste time on the rest
                 return "", {}
             continue
 
-        fetched += 1
         content_type = response.headers.get("Content-Type", "")
 
         if response.status_code != 200 or "text" not in content_type:
@@ -310,20 +262,297 @@ def scan_website(website, timeout=6):
         for platform, link in extract_socials(page).items():
             socials.setdefault(platform, link)
 
-        if fetched == 1:
-            # After the home page: links it points to first, then
-            # the standard contact paths.
-            queue += _discover_pages(response.url, page, site_domain)
-            queue += [root + p for p in CONTACT_PATHS if p]
-
-        if own_emails() and socials and fetched >= 2:
+        # Stop early once both an own-domain email and a social
+        # link have been found.
+        if own_emails() and socials:
             break
 
     own = own_emails()
-    others = [e for e in candidates if e not in own]
-    emails = (own + others)[:3]
+    email = own[0] if own else (candidates[0] if candidates else "")
 
-    return " | ".join(emails), socials
+    return email, socials
+
+
+# ============================================================
+# DIRECTORY RESEARCH (Yelp, BBB, Angi, Facebook, Yellow Pages ...)
+# ============================================================
+# Searches the web for "<business> <city, state>" through a search
+# API, then:
+#   - picks social profiles out of the result links (Facebook,
+#     Instagram, ...) when the result clearly belongs to the business
+#   - reads emails out of result snippets
+#   - opens the matching directory/listing pages and takes emails that
+#     appear right next to the business name
+# Google's own Custom Search API is closed to new customers, so this
+# uses Serper.dev (Google results) or Brave Search instead.
+
+USAGE_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "search_usage.json"
+)
+_usage_lock = threading.Lock()
+_quota_hit = {"day": "", "hit": False}
+
+NO_FETCH_HOSTS = (
+    "facebook.com", "instagram.com", "twitter.com", "x.com",
+    "linkedin.com", "tiktok.com", "youtube.com", "pinterest.com",
+    "yelp.com", "google.com", "apple.com"
+)
+
+DIRECTORY_EMAIL_DOMAINS = (
+    "yelp.com", "bbb.org", "angi.com", "angieslist.com",
+    "yellowpages.com", "thumbtack.com", "homeadvisor.com",
+    "facebook.com", "manta.com", "mapquest.com", "nextdoor.com"
+)
+
+_GENERIC_NAME_WORDS = {
+    "the", "and", "llc", "inc", "co", "corp", "company", "services",
+    "service", "plumbing", "plumber", "plumbers", "pllc", "ltd", "of"
+}
+
+
+def _take_search_slot(daily_limit):
+    """True if one more search may be spent today (and counts it)."""
+    today = date.today().isoformat()
+
+    with _usage_lock:
+        if _quota_hit["day"] == today and _quota_hit["hit"]:
+            return False
+
+        try:
+            with open(USAGE_FILE, "r", encoding="utf-8") as f:
+                usage = json.load(f)
+        except (OSError, ValueError):
+            usage = {}
+
+        if usage.get("date") != today:
+            usage = {"date": today, "count": 0}
+
+        if usage["count"] >= daily_limit:
+            return False
+
+        usage["count"] += 1
+
+        try:
+            with open(USAGE_FILE, "w", encoding="utf-8") as f:
+                json.dump(usage, f)
+        except OSError:
+            pass
+
+        return True
+
+
+def searches_used_today():
+    try:
+        with open(USAGE_FILE, "r", encoding="utf-8") as f:
+            usage = json.load(f)
+        if usage.get("date") == date.today().isoformat():
+            return int(usage.get("count", 0))
+    except (OSError, ValueError):
+        pass
+    return 0
+
+
+def _search_web(query, provider, key, timeout=15):
+    """[{'title','link','snippet'}, ...] from Serper.dev or Brave."""
+    try:
+        if provider == "brave":
+            resp = requests.get(
+                "https://api.search.brave.com/res/v1/web/search",
+                params={"q": query, "count": 10},
+                headers={
+                    "X-Subscription-Token": key,
+                    "Accept": "application/json"
+                },
+                timeout=timeout,
+            )
+        else:
+            resp = requests.post(
+                "https://google.serper.dev/search",
+                json={"q": query, "num": 10, "gl": "us"},
+                headers={
+                    "X-API-KEY": key,
+                    "Content-Type": "application/json"
+                },
+                timeout=timeout,
+            )
+    except requests.RequestException:
+        return []
+
+    if resp.status_code in (401, 402, 403, 429):
+        # Bad key / quota used up: stop wasting calls today.
+        with _usage_lock:
+            _quota_hit["day"] = date.today().isoformat()
+            _quota_hit["hit"] = True
+        return []
+
+    if resp.status_code != 200:
+        return []
+
+    try:
+        data = resp.json()
+    except ValueError:
+        return []
+
+    out = []
+
+    if provider == "brave":
+        for r in (data.get("web") or {}).get("results", []):
+            out.append({
+                "title": r.get("title", ""),
+                "link": r.get("url", ""),
+                "snippet": r.get("description", "")
+            })
+    else:
+        for r in data.get("organic", []):
+            out.append({
+                "title": r.get("title", ""),
+                "link": r.get("link", ""),
+                "snippet": r.get("snippet", "")
+            })
+
+    return out
+
+
+def _host(url):
+    host = urlparse(url).netloc.lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def _name_tokens(name):
+    words = re.findall(r"[a-z0-9]+", (name or "").lower())
+    return [
+        w for w in words
+        if len(w) > 2 and w not in _GENERIC_NAME_WORDS
+    ]
+
+
+def _matches_business(blob, tokens):
+    """Every distinctive word of the business name is in the text."""
+    if not tokens:
+        return False
+    blob = blob.lower()
+    return all(t in blob for t in tokens)
+
+
+def _emails_near_name(text, name, before=300, after=700):
+    """Emails written close to the business name on a page."""
+    low = (text or "").lower()
+    needle = (name or "").lower().strip()
+    found = []
+
+    if not needle:
+        return found
+
+    pos = 0
+    while len(found) < 3:
+        i = low.find(needle, pos)
+        if i < 0:
+            break
+        chunk = text[max(0, i - before): i + after]
+        for e in extract_emails(chunk):
+            if e not in found:
+                found.append(e)
+        pos = i + len(needle)
+
+    return found
+
+
+def web_research(
+    business_name, area, provider, key, daily_limit=200, timeout=8
+):
+    """{'socials': {...}, 'emails': [...], 'sites': [...]}"""
+    result = {"socials": {}, "emails": [], "sites": []}
+
+    if not key:
+        return result
+
+    tokens = _name_tokens(business_name)
+    to_fetch = []
+
+    def handle(items):
+        for item in items:
+            link = item.get("link", "") or ""
+            blob = (
+                f"{item.get('title', '')} {item.get('snippet', '')} {link}"
+            )
+
+            if not _matches_business(blob, tokens):
+                continue
+
+            host = _host(link)
+
+            if host and host not in result["sites"]:
+                result["sites"].append(host)
+
+            for platform, url in extract_socials(link).items():
+                result["socials"].setdefault(platform, url)
+
+            snippet_text = (
+                f"{item.get('title', '')}. {item.get('snippet', '')}"
+            )
+            for e in extract_emails(snippet_text):
+                dom = e.split("@")[-1]
+                if any(dom.endswith(d) for d in DIRECTORY_EMAIL_DOMAINS):
+                    continue
+                if e not in result["emails"]:
+                    result["emails"].append(e)
+
+            if (
+                host
+                and not any(
+                    host == d or host.endswith("." + d)
+                    for d in NO_FETCH_HOSTS
+                )
+                and link not in to_fetch
+            ):
+                to_fetch.append(link)
+
+    def run(query):
+        if not _take_search_slot(daily_limit):
+            return []
+        return _search_web(query, provider, key)
+
+    handle(run(f'"{business_name}" {area}'))
+
+    # Nothing social yet -> one more, social-focused search.
+    if not any(p in result["socials"] for p in ("Facebook", "Instagram")):
+        handle(run(f'"{business_name}" {area} facebook instagram'))
+
+    # Still no email -> read the matching listing pages.
+    if not result["emails"]:
+        for link in to_fetch[:3]:
+            try:
+                resp = requests.get(
+                    link,
+                    headers=REQUEST_HEADERS,
+                    timeout=timeout,
+                    allow_redirects=True
+                )
+            except requests.RequestException:
+                continue
+
+            if resp.status_code != 200 or "text" not in resp.headers.get(
+                "Content-Type", ""
+            ):
+                continue
+
+            page_host = _host(link)
+            page_root = ".".join(page_host.split(".")[-2:])
+
+            for e in _emails_near_name(resp.text[:500000], business_name):
+                dom = e.split("@")[-1]
+                if dom.endswith(page_root):
+                    continue
+                if any(dom.endswith(d) for d in DIRECTORY_EMAIL_DOMAINS):
+                    continue
+                if e not in result["emails"]:
+                    result["emails"].append(e)
+
+            if result["emails"]:
+                break
+
+    result["sites"] = result["sites"][:6]
+    return result
 
 
 # ============================================================
@@ -520,252 +749,8 @@ def add_competitor_columns(
 
 
 # ============================================================
-# SOCIAL PRESENCE (score, follower counts, web-search fallback)
-# ============================================================
-
-MAIN_PLATFORMS = (
-    "Facebook", "Instagram", "X/Twitter", "LinkedIn",
-    "YouTube", "TikTok", "Pinterest"
-)
-
-NAME_STOP = {
-    "plumbing", "plumber", "plumbers", "services", "service",
-    "company", "heating", "cooling", "repair", "repairs", "drain",
-    "drains", "sewer", "water", "the", "and", "inc", "llc"
-}
-
-STATS_RE = re.compile(
-    r"(\d[\d.,]*\s?[KkMm]?)\s+(followers|likes|subscribers)", re.I
-)
-
-
-def social_score(socials):
-    """'Strong (4 platforms)' / 'Moderate' / 'Weak' / 'None found'."""
-    n = sum(1 for p in (socials or {}) if p in MAIN_PLATFORMS)
-
-    if n >= 4:
-        return f"Strong ({n} platforms)"
-    if n >= 2:
-        return f"Moderate ({n} platforms)"
-    if n == 1:
-        return "Weak (1 platform)"
-    return "None found"
-
-
-def profile_stats(url, timeout=6):
-    """Best-effort '1.2K likes' / '350 followers' from a public
-    Facebook/Instagram page. Returns '' when the platform hides it
-    (login wall) - that is normal, not an error."""
-    try:
-        r = requests.get(url, headers=REQUEST_HEADERS, timeout=timeout)
-    except requests.RequestException:
-        return ""
-
-    if r.status_code != 200:
-        return ""
-
-    for tag in re.findall(r"<meta[^>]+>", r.text[:300000], re.I):
-        low = tag.lower()
-        if "og:description" in low or 'name="description"' in low:
-            m = re.search(r'content="([^"]*)"', tag, re.I)
-            if m:
-                s = STATS_RE.search(html.unescape(m.group(1)))
-                if s:
-                    return f"{s.group(1).strip()} {s.group(2).lower()}"
-    return ""
-
-
-def _name_tokens(name):
-    return [
-        t for t in re.findall(r"[a-z0-9]+", (name or "").lower())
-        if len(t) > 3 and t not in NAME_STOP
-    ]
-
-
-def find_socials_via_search(name, city_hint="", timeout=8):
-    """For businesses WITHOUT a website: look for their Facebook /
-    Instagram page through a web search. Best-effort - a result is
-    kept only if the business name appears in the profile URL."""
-    tokens = _name_tokens(name)
-    found = {}
-
-    if not tokens:
-        return found
-
-    for domain in ("facebook.com", "instagram.com"):
-        try:
-            r = requests.post(
-                "https://html.duckduckgo.com/html/",
-                data={"q": f"{name} {city_hint} site:{domain}"},
-                headers=REQUEST_HEADERS,
-                timeout=timeout
-            )
-        except requests.RequestException:
-            continue
-
-        if r.status_code != 200:
-            continue
-
-        for enc in re.findall(r"uddg=([^&\"']+)", r.text):
-            url = unquote(enc)
-            for platform, link in extract_socials(url).items():
-                if any(t in link.lower() for t in tokens):
-                    found.setdefault(platform, link)
-
-    return found
-
-
-# ============================================================
-# ENRICHMENT (email + social for a list of leads)
-# ============================================================
-
-def _city_hint(location):
-    parts = [p.strip() for p in (location or "").split(",")]
-    if len(parts) >= 4:
-        return f"{parts[1]} {parts[3]}"
-    return location or ""
-
-
-def enrich_leads(leads, deep_social=False, city_hint=""):
-    """Fills Email, Social Media Presence, Social Presence Score."""
-    if not leads:
-        return
-
-    sites = [
-        l["Website"] if l["Website"] != "NO WEBSITE" else ""
-        for l in leads
-    ]
-
-    with ThreadPoolExecutor(max_workers=10) as pool:
-        scans = list(pool.map(scan_website, sites))
-
-    found_socials = [dict(s[1]) for s in scans]
-
-    if deep_social:
-        # No-website businesses: try to find their social pages.
-        idx = [i for i, s in enumerate(sites) if not s]
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            res = list(pool.map(
-                lambda i: find_socials_via_search(
-                    leads[i]["Business Name"], city_hint
-                ),
-                idx
-            ))
-        for i, r in zip(idx, res):
-            found_socials[i].update(r)
-
-    stats = [{} for _ in leads]
-
-    if deep_social:
-        jobs = [
-            (i, p, u)
-            for i, soc in enumerate(found_socials)
-            for p, u in soc.items()
-            if p in ("Facebook", "Instagram")
-        ]
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            res = list(pool.map(lambda j: profile_stats(j[2]), jobs))
-        for (i, p, _), r in zip(jobs, res):
-            if r:
-                stats[i][p] = r
-
-    for lead, site, (email, _), soc, st in zip(
-        leads, sites, scans, found_socials, stats
-    ):
-        if site:
-            lead["Email"] = email or "NOT FOUND"
-        else:
-            lead["Email"] = "NO WEBSITE"
-
-        if soc:
-            lead["Social Media Presence"] = format_socials(soc, st)
-        elif site or deep_social:
-            lead["Social Media Presence"] = "NOT FOUND"
-        else:
-            lead["Social Media Presence"] = "NO WEBSITE"
-
-        lead["Social Presence Score"] = social_score(soc)
-
-
-# ============================================================
 # GOOGLE PLACES SEARCH
 # ============================================================
-
-GOOGLE_URL = "https://places.googleapis.com/v1/places:searchText"
-
-GOOGLE_FIELDS = (
-    "places.displayName,"
-    "places.formattedAddress,"
-    "places.id,"
-    "places.websiteUri,"
-    "places.internationalPhoneNumber,"
-    "places.nationalPhoneNumber,"
-    "places.rating,"
-    "places.userRatingCount,"
-    "places.reviews,"
-    "places.location"
-)
-
-
-def _place_to_lead(place):
-    place_id = place.get("id", "")
-
-    if not place_id:
-        return None
-
-    name = place.get("displayName", {}).get("text", "")
-    address = place.get("formattedAddress", "")
-    website = place.get("websiteUri", "")
-
-    # Streamlit's LinkColumn only makes a cell clickable when the
-    # value starts with a valid scheme.
-    if website and not website.lower().startswith(("http://", "https://")):
-        website = f"https://{website}"
-
-    phone = (
-        place.get("internationalPhoneNumber", "")
-        or place.get("nationalPhoneNumber", "")
-    )
-
-    rating = place.get("rating", None)
-    count = place.get("userRatingCount", None)
-    reviews = place.get("reviews", [])
-    loc = place.get("location", {}) or {}
-
-    return {
-        "Business Name": name,
-        "Phone Number": phone,
-        "Email": "",
-        "Social Media Presence": "",
-        "Social Presence Score": "",
-        "Address": address,
-        "Website": website if website else "NO WEBSITE",
-        "Rating": rating,
-        "Reviews": format_reviews(count, reviews),
-        "Review Quality / Service Issues": review_quality(
-            rating, count, reviews
-        ),
-        "Listed On": "Google Maps",
-        "Yelp URL": "",
-        "Place ID": place_id,
-        "Google Maps": build_maps_link(place_id, name, address),
-        "Latitude": loc.get("latitude"),
-        "Longitude": loc.get("longitude")
-    }
-
-
-def _google_post(api_key, body, field_mask):
-    return requests.post(
-        GOOGLE_URL,
-        headers={
-            "Content-Type": "application/json",
-            "X-Goog-Api-Key": api_key,
-            "X-Goog-FieldMask": field_mask
-        },
-        json=body,
-        timeout=30
-    )
-
 
 def search_google_maps(
     api_key,
@@ -773,29 +758,62 @@ def search_google_maps(
     location,
     only_no_website=False,
     page_token=None,
-    deep_social=False,
-    enrich=True
+    area="",
+    search_provider="serper",
+    search_key=None,
+    daily_limit=200
 ):
-    """Google-only search (kept for backwards compatibility)."""
-    body = {"textQuery": f"{business_type} in {location}", "pageSize": 20}
+
+    URL = "https://places.googleapis.com/v1/places:searchText"
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": (
+            "places.displayName,"
+            "places.formattedAddress,"
+            "places.id,"
+            "places.websiteUri,"
+            "places.internationalPhoneNumber,"
+            "places.nationalPhoneNumber,"
+            "places.rating,"
+            "places.userRatingCount,"
+            "places.reviews,"
+            "places.location,"
+            "nextPageToken"
+        )
+    }
+
+    data = {
+        "textQuery": f"{business_type} in {location}",
+        "pageSize": 20
+    }
 
     if page_token:
-        body["pageToken"] = page_token
+        data["pageToken"] = page_token
 
     try:
-        response = _google_post(
-            api_key, body, GOOGLE_FIELDS + ",nextPageToken"
+        response = requests.post(
+            URL,
+            headers=headers,
+            json=data,
+            timeout=30
         )
+
     except requests.RequestException as e:
         return {
-            "success": False, "error": str(e),
-            "leads": [], "next_page_token": None
+            "success": False,
+            "error": str(e),
+            "leads": [],
+            "next_page_token": None
         }
 
     if response.status_code != 200:
         return {
-            "success": False, "error": response.text,
-            "leads": [], "next_page_token": None
+            "success": False,
+            "error": response.text,
+            "leads": [],
+            "next_page_token": None
         }
 
     result = response.json()
@@ -803,15 +821,152 @@ def search_google_maps(
     leads = []
 
     for place in places:
-        lead = _place_to_lead(place)
-        if lead is None:
-            continue
-        if only_no_website and lead["Website"] != "NO WEBSITE":
-            continue
-        leads.append(lead)
 
-    if enrich:
-        enrich_leads(leads, deep_social, _city_hint(location))
+        place_id = place.get("id", "")
+
+        if not place_id:
+            continue
+
+        name = place.get(
+            "displayName",
+            {}
+        ).get(
+            "text",
+            ""
+        )
+
+        address = place.get(
+            "formattedAddress",
+            ""
+        )
+
+        website = place.get(
+            "websiteUri",
+            ""
+        )
+
+        # Make sure the website is a full, absolute URL
+        # (http:// or https://). Streamlit's LinkColumn only
+        # turns a cell into a clickable link when the value
+        # starts with a valid scheme, so a bare domain like
+        # "example.com" would otherwise show as plain text.
+        if website and not website.lower().startswith(
+            ("http://", "https://")
+        ):
+            website = f"https://{website}"
+
+        phone = place.get(
+            "internationalPhoneNumber",
+            ""
+        )
+
+        if not phone:
+            phone = place.get(
+                "nationalPhoneNumber",
+                ""
+            )
+
+        rating = place.get("rating", None)
+
+        reviews_text = format_reviews(
+            place.get("userRatingCount", None),
+            place.get("reviews", [])
+        )
+
+        if only_no_website and website:
+            continue
+
+        google_maps_link = build_maps_link(
+            place_id,
+            name,
+            address
+        )
+
+        loc = place.get("location", {}) or {}
+
+        leads.append({
+            "Business Name": name,
+            "Phone Number": phone,
+            "Email": "",
+            "Social Media Presence": "",
+            "Listed On": "",
+            "Address": address,
+            "Website": website if website else "NO WEBSITE",
+            "Rating": rating,
+            "Reviews": reviews_text,
+            "Review Quality / Service Issues": review_quality(
+                rating,
+                place.get("userRatingCount", None),
+                place.get("reviews", [])
+            ),
+            "Place ID": place_id,
+            "Google Maps": google_maps_link,
+            "Latitude": loc.get("latitude"),
+            "Longitude": loc.get("longitude")
+        })
+
+    # Look up emails on the business websites (in parallel for speed)
+    sites = [
+        lead["Website"] if lead["Website"] != "NO WEBSITE" else ""
+        for lead in leads
+    ]
+
+    scans = [("", {})] * len(leads)
+
+    if sites:
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            scans = list(pool.map(scan_website, sites))
+
+    research_on = bool(search_key)
+
+    # Which leads still miss an email or social profile after the
+    # website scan? (Includes businesses without a website.)
+    todo = []
+
+    if research_on:
+        for idx, (site, (email, socials)) in enumerate(zip(sites, scans)):
+            if not site or not email or not socials:
+                todo.append(idx)
+
+    researched = {}
+
+    if todo:
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            outs = list(pool.map(
+                lambda i: web_research(
+                    leads[i]["Business Name"], area,
+                    search_provider, search_key, daily_limit
+                ),
+                todo
+            ))
+        researched = dict(zip(todo, outs))
+
+    for idx, (lead, site, (email, socials)) in enumerate(
+        zip(leads, sites, scans)
+    ):
+        found = researched.get(idx, {"socials": {}, "emails": [], "sites": []})
+
+        all_socials = dict(socials)
+        for p, u in found["socials"].items():
+            all_socials.setdefault(p, u)
+
+        best_email = email or (found["emails"][0] if found["emails"] else "")
+
+        if best_email:
+            lead["Email"] = best_email
+        elif not site and not research_on:
+            lead["Email"] = "NO WEBSITE"
+        else:
+            lead["Email"] = "NOT FOUND"
+
+        if all_socials:
+            lead["Social Media Presence"] = format_socials(all_socials)
+        elif not site and not research_on:
+            lead["Social Media Presence"] = "NO WEBSITE"
+        else:
+            lead["Social Media Presence"] = "NOT FOUND"
+
+        lead["Listed On"] = ", ".join(found["sites"])
 
     next_page_token = result.get("nextPageToken")
 
@@ -821,296 +976,4 @@ def search_google_maps(
         "total_results_checked": len(places),
         "next_page_token": next_page_token,
         "has_more_pages": bool(next_page_token)
-    }
-
-
-# ============================================================
-# YELP DIRECTORY (official Yelp Fusion API)
-# ============================================================
-# Yelp lists many plumbers that Google Maps ranks low or skips.
-# The API gives name / phone / address / rating / Yelp page but NOT
-# the business website, so Yelp-only businesses are looked up on
-# Google Places to fetch their website (then emails + socials come
-# from that website like every other lead).
-
-YELP_PAGE_SIZE = 20
-
-
-def _digits(phone):
-    d = re.sub(r"\D", "", str(phone or ""))
-    return d[-10:] if len(d) >= 10 else ""
-
-
-def _norm_name(name):
-    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
-
-
-def search_yelp(yelp_key, business_type, location, offset=0):
-    """({'success','leads','next_offset'})"""
-    try:
-        r = requests.get(
-            "https://api.yelp.com/v3/businesses/search",
-            headers={"Authorization": f"Bearer {yelp_key}"},
-            params={
-                "term": business_type,
-                "location": location,
-                "limit": YELP_PAGE_SIZE,
-                "offset": offset
-            },
-            timeout=30
-        )
-    except requests.RequestException as e:
-        return {"success": False, "error": str(e), "leads": []}
-
-    if r.status_code != 200:
-        return {"success": False, "error": r.text, "leads": []}
-
-    data = r.json()
-    leads = []
-
-    for b in data.get("businesses", []):
-        name = b.get("name", "")
-        address = ", ".join(
-            (b.get("location") or {}).get("display_address", [])
-        )
-        rating = b.get("rating")
-        count = b.get("review_count")
-        coords = b.get("coordinates") or {}
-
-        leads.append({
-            "Business Name": name,
-            "Phone Number": b.get("display_phone") or b.get("phone", ""),
-            "Email": "",
-            "Social Media Presence": "",
-            "Social Presence Score": "",
-            "Address": address,
-            "Website": "NO WEBSITE",
-            "Rating": rating,
-            "Reviews": "" if count is None else str(count),
-            "Review Quality / Service Issues": review_quality(
-                rating, count, []
-            ),
-            "Listed On": "Yelp",
-            "Yelp URL": (b.get("url") or "").split("?")[0],
-            "Place ID": "yelp:" + str(b.get("id", "")),
-            "Google Maps": build_maps_link("", name, address),
-            "Latitude": coords.get("latitude"),
-            "Longitude": coords.get("longitude")
-        })
-
-    total = data.get("total", 0)
-    next_offset = offset + YELP_PAGE_SIZE
-    # Yelp only serves the first 1000 results of any search.
-    has_more = next_offset < min(total, 1000)
-
-    return {
-        "success": True,
-        "leads": leads,
-        "next_offset": next_offset if has_more else None
-    }
-
-
-def _same_business(g, y):
-    gp, yp = _digits(g.get("Phone Number")), _digits(y.get("Phone Number"))
-
-    if gp and gp == yp:
-        return True
-
-    if _norm_name(g.get("Business Name")) != _norm_name(
-        y.get("Business Name")
-    ):
-        return False
-
-    a, b = _coords(g), _coords(y)
-
-    if a and b:
-        return _haversine_km(a[0], a[1], b[0], b[1]) < 0.5
-
-    return True
-
-
-def _resolve_on_google(api_key, ylead):
-    """Find a Yelp-only business on Google Places (for its website)."""
-    body = {
-        "textQuery": f"{ylead['Business Name']} {ylead['Address']}",
-        "pageSize": 3
-    }
-
-    try:
-        r = _google_post(api_key, body, GOOGLE_FIELDS)
-        if r.status_code != 200:
-            return None
-        places = r.json().get("places", [])
-    except (requests.RequestException, ValueError):
-        return None
-
-    for place in places:
-        cand = _place_to_lead(place)
-        if cand and _same_business(cand, ylead):
-            cand["Yelp URL"] = ylead["Yelp URL"]
-            cand["Listed On"] = "Google Maps, Yelp"
-            return cand
-
-    return None
-
-
-def merge_yelp(api_key, google_leads, yelp_leads):
-    """Adds Yelp results to Google results without duplicates."""
-    merged = list(google_leads)
-    by_id = {l["Place ID"]: l for l in merged}
-    pending = []
-
-    for y in yelp_leads:
-        match = next((g for g in merged if _same_business(g, y)), None)
-        if match:
-            match["Yelp URL"] = y["Yelp URL"]
-            match["Listed On"] = "Google Maps, Yelp"
-        else:
-            pending.append(y)
-
-    if pending:
-        with ThreadPoolExecutor(max_workers=5) as pool:
-            resolved = list(pool.map(
-                lambda y: _resolve_on_google(api_key, y), pending
-            ))
-
-        for y, res in zip(pending, resolved):
-            if res is None:
-                merged.append(y)           # Yelp-only, no Google match
-            elif res["Place ID"] in by_id:
-                by_id[res["Place ID"]]["Yelp URL"] = y["Yelp URL"]
-                by_id[res["Place ID"]]["Listed On"] = "Google Maps, Yelp"
-            else:
-                merged.append(res)
-                by_id[res["Place ID"]] = res
-
-    return merged
-
-
-# ============================================================
-# ALL SOURCES AT ONCE (no-website focus)
-# ============================================================
-
-def _fetch_page(
-    api_key, business_type, location, yelp_key,
-    google_token, google_done, yelp_offset
-):
-    """One raw page: next Google page + next Yelp page, merged and
-    de-duplicated. Nothing is scanned or filtered here."""
-    warnings = []
-    g_leads, g_token = [], None
-    yelp_leads, y_next = [], None
-    g_done = google_done
-
-    if not google_done:
-        g = search_google_maps(
-            api_key, business_type, location,
-            page_token=google_token, enrich=False
-        )
-        if not g["success"]:
-            return {"success": False, "error": g["error"]}
-        g_leads = g["leads"]
-        g_token = g.get("next_page_token")
-        g_done = not g_token
-
-    if yelp_key and yelp_offset is not None:
-        y = search_yelp(yelp_key, business_type, location, yelp_offset)
-        if y["success"]:
-            yelp_leads = y["leads"]
-            y_next = y["next_offset"]
-        else:
-            warnings.append(f"Yelp error: {y['error']}")
-
-    leads = merge_yelp(api_key, g_leads, yelp_leads) if yelp_leads else g_leads
-
-    return {
-        "success": True,
-        "leads": leads,
-        "warnings": warnings,
-        "next_page_token": g_token,
-        "google_done": g_done,
-        "yelp_next_offset": y_next,
-        "has_more_pages": bool(g_token) or y_next is not None
-    }
-
-
-def search_all_sources(
-    api_key,
-    business_type,
-    location,
-    yelp_key="",
-    google_token=None,
-    google_done=False,
-    yelp_offset=0,
-    deep_social=False,
-    only_no_website=True,
-    min_leads=10,
-    max_pages=5
-):
-    """Keeps fetching pages (Google + Yelp) until at least
-    `min_leads` matching leads are found, there are no more pages, or
-    `max_pages` pages were read in this one click.
-
-    With only_no_website=True, businesses that have a website are
-    dropped right after merging, so they are never scanned (fast) and
-    never saved. Email / social lookup runs only on the kept leads.
-    """
-    kept, warnings = [], []
-    seen_ids = set()
-    pages_read = 0
-    checked = 0
-    state = {
-        "next_page_token": google_token,
-        "google_done": google_done,
-        "yelp_next_offset": yelp_offset,
-        "has_more_pages": True
-    }
-
-    while pages_read < max_pages and state["has_more_pages"]:
-        page = _fetch_page(
-            api_key, business_type, location, yelp_key,
-            state["next_page_token"], state["google_done"],
-            state["yelp_next_offset"]
-        )
-
-        if not page["success"]:
-            if pages_read == 0:
-                return {
-                    "success": False, "error": page["error"],
-                    "leads": [], "next_page_token": None
-                }
-            warnings.append(f"Stopped early: {page['error']}")
-            break
-
-        pages_read += 1
-        warnings += page["warnings"]
-        checked += len(page["leads"])
-
-        for lead in page["leads"]:
-            if lead["Place ID"] in seen_ids:
-                continue
-            seen_ids.add(lead["Place ID"])
-            if only_no_website and lead["Website"] != "NO WEBSITE":
-                continue
-            kept.append(lead)
-
-        state = {
-            k: page[k] for k in (
-                "next_page_token", "google_done",
-                "yelp_next_offset", "has_more_pages"
-            )
-        }
-
-        if len(kept) >= min_leads:
-            break
-
-    enrich_leads(kept, deep_social, _city_hint(location))
-
-    return {
-        "success": True,
-        "leads": kept,
-        "warnings": warnings,
-        "pages_read": pages_read,
-        "businesses_checked": checked,
-        **state
     }

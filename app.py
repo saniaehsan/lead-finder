@@ -81,27 +81,40 @@ with st.sidebar:
         type="password"
     )
 
-    st.header("Yelp (optional)")
+    st.header("Directory Research (optional)")
 
-    yelp_key = st.text_input(
-        "Enter Yelp Fusion API Key",
-        type="password",
-        help=(
-            "Adds Yelp listings to every search. Plumbers found "
-            "only on Yelp are matched on Google to get their website."
-        )
+    st.caption(
+        "Searches Yelp, BBB, Angi, Facebook, Yellow Pages etc. for "
+        "social profiles and emails, also for businesses without a "
+        "website. Needs a search API key."
     )
 
-    st.header("Social media")
+    provider_label = st.selectbox(
+        "Search provider",
+        ["Serper.dev (Google results)", "Brave Search"]
+    )
 
-    deep_social = st.checkbox(
-        "Deep social check (slower)",
-        value=True,
-        help=(
-            "For businesses WITHOUT a website, searches the web for "
-            "their Facebook / Instagram page. Also tries to read "
-            "follower / like counts of the profiles found."
-        )
+    search_provider = (
+        "brave" if provider_label == "Brave Search" else "serper"
+    )
+
+    search_key = st.text_input(
+        "Search API Key (blank = skip research)",
+        type="password"
+    )
+
+    daily_limit = st.number_input(
+        "Max web searches per day",
+        min_value=0,
+        max_value=5000,
+        value=200,
+        help="Each lead that is missing an email or social link "
+             "uses 1-2 searches. Counter resets every day."
+    )
+
+    st.caption(
+        f"Web searches used today: "
+        f"{scraper.searches_used_today()} / {int(daily_limit)}"
     )
 
 
@@ -383,32 +396,20 @@ if st.button(
             )
 
             with st.spinner(
-                f"Searching from Page {page_number} (no-website businesses only)..."
+                f"Searching Page {page_number}, finding emails and social profiles..."
             ):
 
-                result = scraper.search_all_sources(
+                result = scraper.search_google_maps(
                     api_key=api_key,
                     business_type=business_type,
                     location=location,
-                    yelp_key=yelp_key,
-                    google_token=page_token,
-                    google_done=progress.get("google_done", False),
-                    yelp_offset=progress.get("yelp_offset", 0),
-                    deep_social=deep_social,
-                    only_no_website=True,
-                    min_leads=10,
-                    max_pages=5
+                    only_no_website=False,
+                    page_token=page_token,
+                    area=f"{city}, {state}",
+                    search_provider=search_provider,
+                    search_key=search_key.strip() or None,
+                    daily_limit=int(daily_limit)
                 )
-
-                for warning in result.get("warnings", []):
-                    st.warning(warning)
-
-                if result.get("success", False):
-                    st.caption(
-                        f"Read {result.get('pages_read', 0)} page(s), "
-                        f"checked {result.get('businesses_checked', 0)} "
-                        f"businesses, kept only those with NO website."
-                    )
 
             if not result.get("success", False):
 
@@ -540,7 +541,7 @@ if st.button(
                     "next_page_token"
                 )
 
-                if result.get("has_more_pages"):
+                if next_page_token:
 
                     st.session_state[
                         "search_progress"
@@ -548,12 +549,6 @@ if st.button(
 
                         "page_token":
                             next_page_token,
-
-                        "google_done":
-                            result.get("google_done", False),
-
-                        "yelp_offset":
-                            result.get("yelp_next_offset"),
 
                         "page_number":
                             page_number + 1,
@@ -719,20 +714,14 @@ if not st.session_state["leads"].empty:
                 "Social Media Presence",
                 width="large"
             ),
+            "Listed On": st.column_config.TextColumn(
+                "Listed On",
+                width="medium",
+                help="Websites/directories where this business was found"
+            ),
             "Review Quality / Service Issues": st.column_config.TextColumn(
                 "Review Quality / Service Issues",
                 width="large"
-            ),
-            "Social Presence Score": st.column_config.TextColumn(
-                "Social Presence Score"
-            ),
-            "Listed On": st.column_config.TextColumn(
-                "Listed On"
-            ),
-            "Yelp URL": st.column_config.LinkColumn(
-                "Yelp",
-                display_text="Open Yelp",
-                help="Click to open this business on Yelp"
             ),
             "Rating": st.column_config.NumberColumn(
                 "Rating",
@@ -784,7 +773,6 @@ if not st.session_state["leads"].empty:
 
         for col_name, label in (
             ("Google Maps", "Open in Maps"),
-            ("Yelp URL", "Open Yelp"),
             ("Website", None),
             ("Competitors With Well-Designed Websites", None)
         ):
