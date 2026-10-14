@@ -278,6 +278,131 @@ def add_competitor_columns(
     return df
 
 
+
+# ============================================================
+# OWNER FINDER
+# ============================================================
+# Step 1: look for "<Name>, owner" / "owner <Name>" style phrases
+#         in the (up to 5) Google reviews Places API returns.
+# Step 2: (optional, needs a SerpAPI key) Google-search
+#         "<business>" <city> owner and read the result titles /
+#         snippets - these include BBB, Yelp, Facebook, Angi,
+#         license directories etc. without scraping those sites.
+# Results are best-effort: always verify before outreach.
+
+_ROLES = (
+    r"(?i:co-owner|owner|founder|president|general manager|"
+    r"manager|operator|master plumber|ceo)"
+)
+
+# 1-3 capitalised words, e.g. "Mike", "Mike Smith", "Mike J. Smith"
+_NAME = r"([A-Z][a-z]{1,15}(?:\s[A-Z]\.)?(?:\s[A-Z][a-z]{1,20})?)"
+
+_PAT_NAME_THEN_ROLE = re.compile(
+    _NAME + r"\s*(?:,|-|\u2013|\()?\s*(?:is\s+)?(?:the\s+|our\s+)?("
+    + _ROLES + r")\b"
+)
+_PAT_ROLE_THEN_NAME = re.compile(
+    r"\b(" + _ROLES + r")\s*(?:is|:|,|-|\u2013)?\s*" + _NAME
+)
+
+_NOT_NAMES = {
+    "The", "Our", "Great", "Very", "Best", "Good", "Highly", "Super",
+    "Friendly", "Professional", "Awesome", "Amazing", "Excellent",
+    "Family", "Local", "Small", "New", "Real", "Business", "Company",
+    "Plumbing", "Service", "Services", "Manager", "Owner", "Customer",
+    "Contact", "About", "Meet", "And", "But", "Also", "Thanks", "Thank",
+    "Plumber", "Plumbers", "Master", "General", "Called", "Call",
+    "Got", "Had", "Was", "Were", "His", "Her", "Their", "This", "That",
+    "Facebook", "Yelp", "Angi", "Bbb", "Google", "Reviews", "Review"
+}
+
+
+def _clean_name(name, business_name=""):
+    name = (name or "").strip(" .,-")
+    parts = name.split()
+
+    if not parts or parts[0] in _NOT_NAMES:
+        return ""
+
+    if any(p in _NOT_NAMES for p in parts):
+        return ""
+
+    # Skip if it is just part of the business name itself
+    biz = (business_name or "").lower()
+    if biz and name.lower() in biz:
+        return ""
+
+    return name
+
+
+def owner_from_text(text, business_name=""):
+    """(name, role) found in a block of text, or ('', '')."""
+    text = html.unescape(text or "")
+
+    for m in _PAT_NAME_THEN_ROLE.finditer(text):
+        name = _clean_name(m.group(1), business_name)
+        if name:
+            return name, m.group(2).title()
+
+    for m in _PAT_ROLE_THEN_NAME.finditer(text):
+        name = _clean_name(m.group(2), business_name)
+        if name:
+            return name, m.group(1).title()
+
+    return "", ""
+
+
+def owner_from_reviews(reviews, business_name=""):
+    for review in reviews or []:
+        body = (
+            (review.get("text") or {}).get("text", "")
+            or (review.get("originalText") or {}).get("text", "")
+        )
+        name, role = owner_from_text(body, business_name)
+        if name:
+            return name, role, "Google review"
+    return "", "", ""
+
+
+def owner_from_web(business_name, area, serp_key, timeout=15):
+    """Search the web (SerpAPI) and read titles + snippets."""
+    if not serp_key:
+        return "", "", ""
+
+    try:
+        resp = requests.get(
+            "https://serpapi.com/search.json",
+            params={
+                "engine": "google",
+                "q": f'"{business_name}" {area} owner',
+                "num": 10,
+                "api_key": serp_key,
+            },
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            return "", "", ""
+        results = resp.json().get("organic_results", [])
+    except (requests.RequestException, ValueError):
+        return "", "", ""
+
+    for r in results:
+        blob = f"{r.get('title', '')}. {r.get('snippet', '')}"
+        name, role = owner_from_text(blob, business_name)
+        if name:
+            domain = urlparse(r.get("link", "")).netloc.replace("www.", "")
+            return name, role, f"Web ({domain})"
+
+    return "", "", ""
+
+
+def find_owner(business_name, reviews, area, serp_key=None):
+    name, role, src = owner_from_reviews(reviews, business_name)
+    if name:
+        return name, role, src
+    return owner_from_web(business_name, area, serp_key)
+
 # ============================================================
 # GOOGLE PLACES SEARCH
 # ============================================================
@@ -287,7 +412,10 @@ def search_google_maps(
     business_type,
     location,
     only_no_website=False,
-    page_token=None
+    page_token=None,
+    find_owners=True,
+    serp_key=None,
+    area=""
 ):
 
     URL = "https://places.googleapis.com/v1/places:searchText"
@@ -345,6 +473,7 @@ def search_google_maps(
     result = response.json()
     places = result.get("places", [])
     leads = []
+    raw_reviews = []
 
     for place in places:
 
@@ -414,6 +543,9 @@ def search_google_maps(
             "Business Name": name,
             "Phone Number": phone,
             "Email": "",
+            "Owner Name": "",
+            "Owner Role": "",
+            "Owner Source": "",
             "Address": address,
             "Website": website if website else "NO WEBSITE",
             "Rating": rating,
@@ -423,6 +555,7 @@ def search_google_maps(
             "Latitude": loc.get("latitude"),
             "Longitude": loc.get("longitude")
         })
+        raw_reviews.append(place.get("reviews", []))
 
     # Look up emails on the business websites (in parallel for speed)
     sites = [
@@ -439,6 +572,20 @@ def search_google_maps(
                 lead["Email"] = "NO WEBSITE"
             else:
                 lead["Email"] = email if email else "NOT FOUND"
+
+    if find_owners and leads:
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            owners = list(pool.map(
+                lambda args: find_owner(
+                    args[0]["Business Name"], args[1], area, serp_key
+                ),
+                zip(leads, raw_reviews)
+            ))
+
+        for lead, (o_name, o_role, o_src) in zip(leads, owners):
+            lead["Owner Name"] = o_name or "NOT FOUND"
+            lead["Owner Role"] = o_role
+            lead["Owner Source"] = o_src
 
     next_page_token = result.get("nextPageToken")
 

@@ -81,6 +81,21 @@ with st.sidebar:
         type="password"
     )
 
+    st.header("Owner Finder (optional)")
+
+    find_owner_on = st.checkbox(
+        "Find owner name & role",
+        value=True,
+        help="Step 1 scans Google reviews (free). "
+             "Step 2 (needs a SerpAPI key) searches the web for "
+             "BBB / Yelp / Facebook / directory listings."
+    )
+
+    serp_key = st.text_input(
+        "SerpAPI Key (for web search, optional)",
+        type="password"
+    )
+
 
 # ============================================================
 # COUNTRY
@@ -215,7 +230,8 @@ business_options = [
 
 business_type = st.selectbox(
     "Business Type",
-    business_options
+    business_options,
+    index=business_options.index("Plumbers")
 )
 
 
@@ -234,14 +250,14 @@ with col1:
             "Only No Website",
             "Only With Website"
         ],
-        index=0
+        index=1   # default: "Only No Website"
     )
 
 with col2:
 
     phone_filter = st.checkbox(
         "Only businesses with phone numbers",
-        value=False
+        value=True
     )
 
 
@@ -359,7 +375,7 @@ if st.button(
             )
 
             with st.spinner(
-                f"Searching Page {page_number} and finding emails..."
+                f"Searching Page {page_number}, finding emails and owners..."
             ):
 
                 result = scraper.search_google_maps(
@@ -367,7 +383,10 @@ if st.button(
                     business_type=business_type,
                     location=location,
                     only_no_website=False,
-                    page_token=page_token
+                    page_token=page_token,
+                    find_owners=find_owner_on,
+                    serp_key=serp_key or None,
+                    area=f"{city}, {state}"
                 )
 
             if not result.get("success", False):
