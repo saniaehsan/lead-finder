@@ -562,6 +562,10 @@ if not st.session_state["leads"].empty:
         .copy()
     )
 
+    # Competitors are calculated from ALL saved leads (before the
+    # filters below), so filtering does not remove competitors.
+    df = scraper.add_competitor_columns(df)
+
     st.divider()
 
     st.subheader(
@@ -631,6 +635,12 @@ if not st.session_state["leads"].empty:
     # the text "NO WEBSITE". So the Website column is shown as
     # plain text, and a separate "Open Website" column holds the
     # clickable link (empty when there is no website).
+    # Latitude / Longitude are only used for distance maths.
+    filtered_df = filtered_df.drop(
+        columns=["Latitude", "Longitude"],
+        errors="ignore"
+    )
+
     display_df = filtered_df.copy()
 
     website_col_pos = list(display_df.columns).index("Website") + 1
@@ -666,12 +676,11 @@ if not st.session_state["leads"].empty:
                 "Nearby Competitors",
                 width="large"
             ),
-            "Competitors With Well-Designed Websites": (
+            "Competitors With Well-Designed Websites":
                 st.column_config.TextColumn(
                     "Competitors With Well-Designed Websites",
                     width="large"
-                )
-            ),
+                ),
             "Open Website": st.column_config.LinkColumn(
                 "Open Website",
                 display_text="Open Website",

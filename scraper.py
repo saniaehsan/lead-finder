@@ -1,7 +1,6 @@
 import math
-import concurrent.futures
 import requests
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote_plus
 
 
 def build_maps_link(place_id, name="", address=""):
@@ -60,30 +59,15 @@ def format_reviews(count, reviews):
 
 
 # ============================================================
-# NEARBY COMPETITORS
+# COMPETITOR COLUMNS
 # ============================================================
 
-COMPETITOR_RADIUS_M = 10000      # search / keep radius (10 km)
-COMPETITORS_FETCHED = 15         # how many nearby places to look at
-MAX_COMPETITORS_SHOWN = 5        # max names per cell
-
-# Not a business's own website -> never counted as a "good website"
-NOT_A_REAL_WEBSITE = (
-    "facebook.com", "instagram.com", "twitter.com", "x.com",
-    "linkedin.com", "youtube.com", "tiktok.com", "pinterest.com",
-    "yelp.com", "yellowpages.com", "mapquest.com", "bbb.org",
-    "angi.com", "angieslist.com", "thumbtack.com", "homeadvisor.com",
-    "nextdoor.com", "manta.com", "linktr.ee", "google.com",
-    "business.site", "wixsite.com", "weebly.com", "godaddysites.com",
-    "tripadvisor.com", "doordash.com", "ubereats.com", "grubhub.com",
-)
-
-
-def haversine_km(lat1, lon1, lat2, lon2):
+def _haversine_km(lat1, lng1, lat2, lng2):
+    """Distance between two lat/lng points in kilometres."""
     r = 6371.0
     p1, p2 = math.radians(lat1), math.radians(lat2)
     dp = p2 - p1
-    dl = math.radians(lon2 - lon1)
+    dl = math.radians(lng2 - lng1)
     a = (
         math.sin(dp / 2) ** 2
         + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
@@ -91,110 +75,90 @@ def haversine_km(lat1, lon1, lat2, lon2):
     return 2 * r * math.asin(math.sqrt(a))
 
 
-def is_quality_website(url):
-    """Proper own-domain https website (not social/directory/free builder).
-
-    Google's API cannot judge design quality, so this is a practical
-    proxy: secure (https) + the business's own domain.
-    """
-    if not url or not str(url).lower().startswith("https://"):
-        return False
-
-    host = (urlparse(str(url)).netloc or "").lower().split(":")[0]
-
-    if host.startswith("www."):
-        host = host[4:]
-
-    for bad in NOT_A_REAL_WEBSITE:
-        if host == bad or host.endswith("." + bad):
-            return False
-
-    return "." in host
-
-
-def find_competitors(api_key, business_type, lat, lon, own_place_id):
-    """Return (nearby_competitors_text, competitors_with_websites_text)."""
-    if lat is None or lon is None:
-        return "", ""
-
-    headers = {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": api_key,
-        "X-Goog-FieldMask": (
-            "places.id,"
-            "places.displayName,"
-            "places.websiteUri,"
-            "places.location"
-        )
-    }
-
-    data = {
-        "textQuery": business_type,
-        "pageSize": COMPETITORS_FETCHED,
-        "locationBias": {
-            "circle": {
-                "center": {"latitude": lat, "longitude": lon},
-                "radius": float(COMPETITOR_RADIUS_M)
-            }
-        }
-    }
-
+def _coords(rec):
     try:
-        response = requests.post(
-            "https://places.googleapis.com/v1/places:searchText",
-            headers=headers,
-            json=data,
-            timeout=30
-        )
+        lat = float(rec.get("Latitude"))
+        lng = float(rec.get("Longitude"))
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(lat) or math.isnan(lng):
+        return None
+    return lat, lng
 
-        if response.status_code != 200:
-            return "", ""
 
-        places = response.json().get("places", [])
+def _has_website(rec):
+    return str(rec.get("Website", "") or "").lower().startswith(
+        ("http://", "https://")
+    )
 
-    except (requests.RequestException, ValueError):
-        return "", ""
 
-    found = []
+def _rating(rec):
+    r = rec.get("Rating")
+    try:
+        r = float(r)
+    except (TypeError, ValueError):
+        return 0.0
+    return 0.0 if math.isnan(r) else r
 
-    for p in places:
 
-        if p.get("id") == own_place_id:
+def add_competitor_columns(
+    df,
+    radius_km=5,
+    max_nearby=5,
+    max_with_website=3
+):
+    """Adds two columns using all saved leads as the pool:
+
+    - "Nearby Competitors": same business type within radius_km,
+      nearest first -> "Name (1.2 km) | Name (2.0 km)"
+    - "Competitors With Well-Designed Websites": nearby competitors
+      that HAVE a website, best rated first -> "Name - https://..."
+    """
+    df = df.copy()
+    nearby_col, web_col = [], []
+
+    records = df.to_dict("records")
+
+    for i, rec in enumerate(records):
+        me = _coords(rec)
+
+        if me is None:
+            nearby_col.append("")
+            web_col.append("")
             continue
 
-        loc = p.get("location") or {}
-        p_lat = loc.get("latitude")
-        p_lon = loc.get("longitude")
+        cands = []
 
-        if p_lat is None or p_lon is None:
-            continue
+        for j, other in enumerate(records):
+            if j == i or other.get("Place ID") == rec.get("Place ID"):
+                continue
+            if other.get("Business Type") != rec.get("Business Type"):
+                continue
+            pt = _coords(other)
+            if pt is None:
+                continue
+            d = _haversine_km(me[0], me[1], pt[0], pt[1])
+            if d <= radius_km:
+                cands.append((d, other))
 
-        dist = haversine_km(lat, lon, p_lat, p_lon)
+        cands.sort(key=lambda x: x[0])
 
-        if dist * 1000 > COMPETITOR_RADIUS_M:
-            continue
+        nearby_col.append(" | ".join(
+            f"{o.get('Business Name', '')} ({d:.1f} km)"
+            for d, o in cands[:max_nearby]
+        ))
 
-        name = p.get("displayName", {}).get("text", "")
+        with_site = [(d, o) for d, o in cands if _has_website(o)]
+        with_site.sort(key=lambda x: (-_rating(x[1]), x[0]))
 
-        if not name:
-            continue
+        web_col.append(" | ".join(
+            f"{o.get('Business Name', '')} - {o.get('Website', '')}"
+            for d, o in with_site[:max_with_website]
+        ))
 
-        found.append((dist, name, p.get("websiteUri", "")))
-
-    found.sort(key=lambda x: x[0])
-
-    nearby = [
-        f"{name} ({dist:.1f} km)"
-        for dist, name, _ in found[:MAX_COMPETITORS_SHOWN]
-    ]
-
-    with_sites = [
-        f"{name} - {site}"
-        for _, name, site in found
-        if is_quality_website(site)
-    ][:MAX_COMPETITORS_SHOWN]
-
-    return "; ".join(nearby), "; ".join(with_sites)
+    df["Nearby Competitors"] = nearby_col
+    df["Competitors With Well-Designed Websites"] = web_col
+    return df
 
 
 # ============================================================
@@ -264,7 +228,6 @@ def search_google_maps(
     result = response.json()
     places = result.get("places", [])
     leads = []
-    coords = []
 
     for place in places:
 
@@ -322,18 +285,13 @@ def search_google_maps(
         if only_no_website and website:
             continue
 
-        loc = place.get("location") or {}
-        coords.append((
-            loc.get("latitude"),
-            loc.get("longitude"),
-            place_id
-        ))
-
         google_maps_link = build_maps_link(
             place_id,
             name,
             address
         )
+
+        loc = place.get("location", {}) or {}
 
         leads.append({
             "Business Name": name,
@@ -342,27 +300,11 @@ def search_google_maps(
             "Website": website if website else "NO WEBSITE",
             "Rating": rating,
             "Reviews": reviews_text,
-            "Nearby Competitors": "",
-            "Competitors With Well-Designed Websites": "",
             "Place ID": place_id,
-            "Google Maps": google_maps_link
+            "Google Maps": google_maps_link,
+            "Latitude": loc.get("latitude"),
+            "Longitude": loc.get("longitude")
         })
-
-    # Nearby competitors for every lead (parallel, one search each)
-    if leads:
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=5
-        ) as pool:
-            outcomes = list(pool.map(
-                lambda c: find_competitors(
-                    api_key, business_type, c[0], c[1], c[2]
-                ),
-                coords
-            ))
-
-        for lead, (nearby, with_sites) in zip(leads, outcomes):
-            lead["Nearby Competitors"] = nearby
-            lead["Competitors With Well-Designed Websites"] = with_sites
 
     next_page_token = result.get("nextPageToken")
 
