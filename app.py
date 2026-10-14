@@ -81,42 +81,6 @@ with st.sidebar:
         type="password"
     )
 
-    st.header("Directory Research (optional)")
-
-    st.caption(
-        "Searches Yelp, BBB, Angi, Facebook, Yellow Pages etc. for "
-        "social profiles and emails, also for businesses without a "
-        "website. Needs a search API key."
-    )
-
-    provider_label = st.selectbox(
-        "Search provider",
-        ["Serper.dev (Google results)", "Brave Search"]
-    )
-
-    search_provider = (
-        "brave" if provider_label == "Brave Search" else "serper"
-    )
-
-    search_key = st.text_input(
-        "Search API Key (blank = skip research)",
-        type="password"
-    )
-
-    daily_limit = st.number_input(
-        "Max web searches per day",
-        min_value=0,
-        max_value=5000,
-        value=200,
-        help="Each lead that is missing an email or social link "
-             "uses 1-2 searches. Counter resets every day."
-    )
-
-    st.caption(
-        f"Web searches used today: "
-        f"{scraper.searches_used_today()} / {int(daily_limit)}"
-    )
-
 
 # ============================================================
 # COUNTRY
@@ -271,7 +235,7 @@ with col1:
             "Only No Website",
             "Only With Website"
         ],
-        index=1   # default: "Only No Website"
+        index=1
     )
 
 with col2:
@@ -396,7 +360,7 @@ if st.button(
             )
 
             with st.spinner(
-                f"Searching Page {page_number}, finding emails and social profiles..."
+                f"Searching Page {page_number} and finding emails & owners..."
             ):
 
                 result = scraper.search_google_maps(
@@ -404,11 +368,7 @@ if st.button(
                     business_type=business_type,
                     location=location,
                     only_no_website=False,
-                    page_token=page_token,
-                    area=f"{city}, {state}",
-                    search_provider=search_provider,
-                    search_key=search_key.strip() or None,
-                    daily_limit=int(daily_limit)
+                    page_token=page_token
                 )
 
             if not result.get("success", False):
@@ -709,19 +669,6 @@ if not st.session_state["leads"].empty:
             "Email": st.column_config.TextColumn(
                 "Email",
                 width="medium"
-            ),
-            "Social Media Presence": st.column_config.TextColumn(
-                "Social Media Presence",
-                width="large"
-            ),
-            "Listed On": st.column_config.TextColumn(
-                "Listed On",
-                width="medium",
-                help="Websites/directories where this business was found"
-            ),
-            "Review Quality / Service Issues": st.column_config.TextColumn(
-                "Review Quality / Service Issues",
-                width="large"
             ),
             "Rating": st.column_config.NumberColumn(
                 "Rating",

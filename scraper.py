@@ -1,13 +1,11 @@
 import html
-import json
 import math
-import os
 import re
 import threading
-from datetime import date
+import time
 from concurrent.futures import ThreadPoolExecutor
 import requests
-from urllib.parse import quote_plus, unquote, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 
 def build_maps_link(place_id, name="", address=""):
@@ -66,12 +64,12 @@ def format_reviews(count, reviews):
 
 
 # ============================================================
-# EMAIL FINDER (reads the business's own public website)
+# EMAIL + OWNER FINDER (reads the business's own public website)
 # ============================================================
-# Google Places does NOT provide email addresses, so the email is
-# looked up on the business website: home page first, then the
-# usual contact/about pages. Only emails written publicly on the
-# site are collected.
+# Google Places does NOT provide emails or owner details, so they
+# are looked up on the business website: home page first, then the
+# usual contact / about / team pages. Only information written
+# publicly on the site is collected.
 
 EMAIL_RE = re.compile(
     r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
@@ -87,9 +85,9 @@ BAD_EMAIL_EXT = (
     ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".css", ".js"
 )
 
-CONTACT_PATHS = [
-    "", "/contact", "/contact-us", "/contact-us/",
-    "/about", "/about-us"
+SITE_PATHS = [
+    "", "/contact", "/contact-us", "/about", "/about-us",
+    "/our-team", "/team", "/meet-the-team", "/staff"
 ]
 
 REQUEST_HEADERS = {
@@ -99,6 +97,130 @@ REQUEST_HEADERS = {
         "Chrome/124.0 Safari/537.36"
     )
 }
+
+# ---- owner detection ----------------------------------------
+
+# Best role first (used to pick between several people found)
+OWNER_ROLES = [
+    ("owner", "Owner"),
+    ("co-owner", "Co-Owner"),
+    ("co owner", "Co-Owner"),
+    ("proprietor", "Proprietor"),
+    ("founder", "Founder"),
+    ("co-founder", "Co-Founder"),
+    ("co founder", "Co-Founder"),
+    ("president", "President"),
+    ("ceo", "CEO"),
+    ("chief executive officer", "CEO"),
+    ("managing partner", "Managing Partner"),
+    ("principal", "Principal"),
+]
+
+ROLE_LABEL = dict(OWNER_ROLES)
+ROLE_PRIORITY = {
+    label: i for i, (_, label) in reversed(list(enumerate(OWNER_ROLES)))
+}
+
+_ROLE_ALT = "|".join(
+    re.escape(k) for k in sorted(ROLE_LABEL, key=len, reverse=True)
+)
+ROLE = rf"(?i:{_ROLE_ALT})"
+
+NAME = r"[A-Z][a-z'\-]+(?:\s+[A-Z]\.?)?\s+[A-Z][A-Za-z'\-]+"
+
+BAD_NAME_WORDS = set("""
+plumbing services service heating cooling air company inc llc family
+team our the meet contact about home repair repairs roofing electric
+electrical group corp co staff owner founder president manager office
+united states street road avenue drive suite phone email call free
+estimate licensed insured master plumber best quality customer support
+privacy policy terms all rights reserved new york north south east west
+county city dental dentist salon gym hotel restaurant auto real estate
+agents marketing agency lawyers law firm attorney attorneys senior chief
+executive officer and of for with from your view read more learn
+""".split())
+
+SEP = r"\s*[,\-–—|:(]\s*(?i:the\s+)?"
+
+PAT_NAME_ROLE = re.compile(rf"({NAME}){SEP}({ROLE})\b")
+PAT_ROLE_NAME = re.compile(rf"\b({ROLE})\s*[:\-–—|]\s*({NAME})")
+PAT_NAME_IS = re.compile(
+    rf"({NAME})\s+(?i:is|serves as)\s+(?i:the\s+)?(?:\w+\s+){{0,2}}?"
+    rf"(?i:and\s+)?({ROLE})\b"
+)
+PAT_BY = re.compile(
+    rf"(?i:owned|founded|operated|started|run)\s+(?i:by)\s+({NAME})"
+)
+NAME_ONLY = re.compile(
+    r"[A-Z][a-z'\-]+(?:\s+[A-Z][a-z'\-]*\.?)?\s+[A-Z][A-Za-z'\-]+"
+)
+ROLE_LINE = re.compile(rf"^({ROLE})\b[^.]{{0,40}}$")
+
+
+def _valid_name(name):
+    words = re.split(r"\s+", name.strip())
+
+    if not 2 <= len(words) <= 3:
+        return False
+
+    return not any(
+        w.strip(".,").lower() in BAD_NAME_WORDS for w in words
+    )
+
+
+def html_to_lines(page_html):
+    """Very small HTML -> list of text lines (no extra libraries)."""
+    text = re.sub(
+        r"(?is)<(script|style|noscript)[^>]*>.*?</\1>", " ", page_html
+    )
+    text = re.sub(r"(?s)<!--.*?-->", " ", text)
+    text = re.sub(r"(?i)<br\s*/?>|</(p|div|li|h[1-6]|tr|td|section)>",
+                  "\n", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+
+    lines = []
+    for line in text.split("\n"):
+        line = re.sub(r"\s+", " ", line).strip()
+        if line:
+            lines.append(line)
+    return lines
+
+
+def extract_owners(page_html):
+    """[(priority, name, role_label), ...] found in one page."""
+    lines = html_to_lines(page_html)
+    found = []
+
+    def add(name, role_text):
+        label = ROLE_LABEL.get(role_text.lower().strip())
+        if label and _valid_name(name):
+            found.append((ROLE_PRIORITY[label], name.strip(), label))
+
+    for line in lines:
+        for name, role in PAT_NAME_ROLE.findall(line):
+            add(name, role)
+        for role, name in PAT_ROLE_NAME.findall(line):
+            add(name, role)
+        for name, role in PAT_NAME_IS.findall(line):
+            add(name, role)
+        for name in PAT_BY.findall(line):
+            if _valid_name(name):
+                found.append((ROLE_PRIORITY["Owner"], name.strip(), "Owner"))
+
+    # Team cards: a name on one line and the role on the next/previous
+    for i, line in enumerate(lines):
+        m = ROLE_LINE.match(line)
+        if not m:
+            continue
+        # Previous line first (usual card layout); next line only if
+        # the previous one is not a name.
+        if i > 0 and NAME_ONLY.fullmatch(lines[i - 1]):
+            add(lines[i - 1], m.group(1))
+        elif i + 1 < len(lines) and NAME_ONLY.fullmatch(lines[i + 1]):
+            add(lines[i + 1], m.group(1))
+
+    return found
 
 
 def extract_emails(text):
@@ -121,99 +243,17 @@ def extract_emails(text):
     return found
 
 
-# ---- Social media links (found on the same website pages) ------
+def scrape_contact_info(website, timeout=6):
+    """{"email", "owner_name", "owner_role"} found on a website.
 
-SOCIAL_SITES = (
-    ("Facebook", ("facebook.com", "fb.com")),
-    ("Instagram", ("instagram.com",)),
-    ("X/Twitter", ("twitter.com", "x.com")),
-    ("LinkedIn", ("linkedin.com",)),
-    ("YouTube", ("youtube.com", "youtu.be")),
-    ("TikTok", ("tiktok.com",)),
-    ("Pinterest", ("pinterest.com",)),
-    ("Yelp", ("yelp.com",)),
-)
+    Any value that was not found is "".
+    """
+    result = {"email": "", "owner_name": "", "owner_role": ""}
 
-SOCIAL_LINK_RE = re.compile(
-    r"https?://(?:[a-z0-9\-]+\.)*"
-    r"(?:facebook\.com|fb\.com|instagram\.com|twitter\.com|x\.com|"
-    r"linkedin\.com|youtube\.com|youtu\.be|tiktok\.com|"
-    r"pinterest\.com|yelp\.com)/[^\s\"'<>\\)\]]+",
-    re.I
-)
-
-# Share buttons, embeds, single posts, login pages etc. are not the
-# business's own profile.
-BAD_SOCIAL_PARTS = (
-    "sharer", "share", "intent/", "/plugins/", "/tr?", "dialog",
-    "embed", "watch", "login", "signup", "privacy", "policies",
-    "hashtag", "explore", "/p/", "/reel", "/status/", "/posts/",
-    "/videos/", "/photo", "/events/", "/groups/"
-)
-
-
-def _normalize_social(url, platform):
-    """Cut a social URL down to the profile root (or None)."""
-    parsed = urlparse(url)
-    segs = [p for p in parsed.path.split("/") if p]
-
-    if not segs:
-        return None
-
-    if platform == "LinkedIn":
-        keep = 2
-    elif platform == "YouTube":
-        keep = 1 if segs[0].startswith("@") else 2
-    elif platform == "Yelp":
-        keep = 2
-    elif platform == "Facebook":
-        if segs[0] == "profile.php":
-            return None
-        keep = 3 if segs[0] == "pages" else 1
-    else:
-        keep = 1
-
-    if len(segs) < keep:
-        return None
-
-    return f"https://{parsed.netloc}/" + "/".join(segs[:keep])
-
-
-def extract_socials(text):
-    """{'Facebook': url, 'Instagram': url, ...} found in HTML/text."""
-    text = html.unescape(text or "").replace("\\/", "/")
-    found = {}
-
-    for match in SOCIAL_LINK_RE.findall(text):
-        url = match.split("?")[0].split("#")[0].rstrip("/.,;")
-        low = url.lower()
-
-        if any(bad in low for bad in BAD_SOCIAL_PARTS):
-            continue
-
-        host = urlparse(url).netloc.lower()
-
-        for platform, domains in SOCIAL_SITES:
-            if any(host == d or host.endswith("." + d) for d in domains):
-                clean = _normalize_social(url, platform)
-                if clean:
-                    found.setdefault(platform, clean)
-                break
-
-    return found
-
-
-def format_socials(socials):
-    """'Facebook: https://... | Instagram: https://...'"""
-    return " | ".join(f"{p}: {u}" for p, u in socials.items())
-
-
-def scan_website(website, timeout=6):
-    """(email, socials_dict) found on a business website."""
     if not website or not str(website).lower().startswith(
         ("http://", "https://")
     ):
-        return "", {}
+        return result
 
     parsed = urlparse(website)
     root = f"{parsed.scheme}://{parsed.netloc}"
@@ -222,16 +262,10 @@ def scan_website(website, timeout=6):
     if site_domain.startswith("www."):
         site_domain = site_domain[4:]
 
-    candidates = []
-    socials = {}
+    emails = []
+    owners = []
 
-    def own_emails():
-        return [
-            e for e in candidates
-            if e.split("@")[-1].endswith(site_domain)
-        ]
-
-    for i, path in enumerate(CONTACT_PATHS):
+    for i, path in enumerate(SITE_PATHS):
 
         url = website if path == "" else root + path
 
@@ -245,7 +279,7 @@ def scan_website(website, timeout=6):
         except requests.RequestException:
             if i == 0:
                 # Home page unreachable -> don't waste time on the rest
-                return "", {}
+                break
             continue
 
         content_type = response.headers.get("Content-Type", "")
@@ -256,274 +290,284 @@ def scan_website(website, timeout=6):
         page = response.text[:500000]
 
         for email in extract_emails(page):
-            if email not in candidates:
-                candidates.append(email)
+            if email not in emails:
+                emails.append(email)
 
-        for platform, link in extract_socials(page).items():
-            socials.setdefault(platform, link)
+        owners.extend(extract_owners(page))
 
-        # Stop early once both an own-domain email and a social
-        # link have been found.
-        if own_emails() and socials:
+        own_email = [
+            e for e in emails
+            if e.split("@")[-1].endswith(site_domain)
+        ]
+
+        # Stop early once we have a good email AND an owner
+        if own_email and owners:
             break
 
-    own = own_emails()
-    email = own[0] if own else (candidates[0] if candidates else "")
-
-    return email, socials
-
-
-# ============================================================
-# DIRECTORY RESEARCH (Yelp, BBB, Angi, Facebook, Yellow Pages ...)
-# ============================================================
-# Searches the web for "<business> <city, state>" through a search
-# API, then:
-#   - picks social profiles out of the result links (Facebook,
-#     Instagram, ...) when the result clearly belongs to the business
-#   - reads emails out of result snippets
-#   - opens the matching directory/listing pages and takes emails that
-#     appear right next to the business name
-# Google's own Custom Search API is closed to new customers, so this
-# uses Serper.dev (Google results) or Brave Search instead.
-
-USAGE_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "search_usage.json"
-)
-_usage_lock = threading.Lock()
-_quota_hit = {"day": "", "hit": False}
-
-NO_FETCH_HOSTS = (
-    "facebook.com", "instagram.com", "twitter.com", "x.com",
-    "linkedin.com", "tiktok.com", "youtube.com", "pinterest.com",
-    "yelp.com", "google.com", "apple.com"
-)
-
-DIRECTORY_EMAIL_DOMAINS = (
-    "yelp.com", "bbb.org", "angi.com", "angieslist.com",
-    "yellowpages.com", "thumbtack.com", "homeadvisor.com",
-    "facebook.com", "manta.com", "mapquest.com", "nextdoor.com"
-)
-
-_GENERIC_NAME_WORDS = {
-    "the", "and", "llc", "inc", "co", "corp", "company", "services",
-    "service", "plumbing", "plumber", "plumbers", "pllc", "ltd", "of"
-}
-
-
-def _take_search_slot(daily_limit):
-    """True if one more search may be spent today (and counts it)."""
-    today = date.today().isoformat()
-
-    with _usage_lock:
-        if _quota_hit["day"] == today and _quota_hit["hit"]:
-            return False
-
-        try:
-            with open(USAGE_FILE, "r", encoding="utf-8") as f:
-                usage = json.load(f)
-        except (OSError, ValueError):
-            usage = {}
-
-        if usage.get("date") != today:
-            usage = {"date": today, "count": 0}
-
-        if usage["count"] >= daily_limit:
-            return False
-
-        usage["count"] += 1
-
-        try:
-            with open(USAGE_FILE, "w", encoding="utf-8") as f:
-                json.dump(usage, f)
-        except OSError:
-            pass
-
-        return True
-
-
-def searches_used_today():
-    try:
-        with open(USAGE_FILE, "r", encoding="utf-8") as f:
-            usage = json.load(f)
-        if usage.get("date") == date.today().isoformat():
-            return int(usage.get("count", 0))
-    except (OSError, ValueError):
-        pass
-    return 0
-
-
-def _search_web(query, provider, key, timeout=15):
-    """[{'title','link','snippet'}, ...] from Serper.dev or Brave."""
-    try:
-        if provider == "brave":
-            resp = requests.get(
-                "https://api.search.brave.com/res/v1/web/search",
-                params={"q": query, "count": 10},
-                headers={
-                    "X-Subscription-Token": key,
-                    "Accept": "application/json"
-                },
-                timeout=timeout,
-            )
-        else:
-            resp = requests.post(
-                "https://google.serper.dev/search",
-                json={"q": query, "num": 10, "gl": "us"},
-                headers={
-                    "X-API-KEY": key,
-                    "Content-Type": "application/json"
-                },
-                timeout=timeout,
-            )
-    except requests.RequestException:
-        return []
-
-    if resp.status_code in (401, 402, 403, 429):
-        # Bad key / quota used up: stop wasting calls today.
-        with _usage_lock:
-            _quota_hit["day"] = date.today().isoformat()
-            _quota_hit["hit"] = True
-        return []
-
-    if resp.status_code != 200:
-        return []
-
-    try:
-        data = resp.json()
-    except ValueError:
-        return []
-
-    out = []
-
-    if provider == "brave":
-        for r in (data.get("web") or {}).get("results", []):
-            out.append({
-                "title": r.get("title", ""),
-                "link": r.get("url", ""),
-                "snippet": r.get("description", "")
-            })
-    else:
-        for r in data.get("organic", []):
-            out.append({
-                "title": r.get("title", ""),
-                "link": r.get("link", ""),
-                "snippet": r.get("snippet", "")
-            })
-
-    return out
-
-
-def _host(url):
-    host = urlparse(url).netloc.lower()
-    return host[4:] if host.startswith("www.") else host
-
-
-def _name_tokens(name):
-    words = re.findall(r"[a-z0-9]+", (name or "").lower())
-    return [
-        w for w in words
-        if len(w) > 2 and w not in _GENERIC_NAME_WORDS
+    own_email = [
+        e for e in emails if e.split("@")[-1].endswith(site_domain)
     ]
 
+    if own_email:
+        result["email"] = own_email[0]
+    elif emails:
+        result["email"] = emails[0]
 
-def _matches_business(blob, tokens):
-    """Every distinctive word of the business name is in the text."""
-    if not tokens:
-        return False
-    blob = blob.lower()
-    return all(t in blob for t in tokens)
+    if owners:
+        owners.sort(key=lambda x: x[0])
+        result["owner_name"] = owners[0][1]
+        result["owner_role"] = owners[0][2]
 
-
-def _emails_near_name(text, name, before=300, after=700):
-    """Emails written close to the business name on a page."""
-    low = (text or "").lower()
-    needle = (name or "").lower().strip()
-    found = []
-
-    if not needle:
-        return found
-
-    pos = 0
-    while len(found) < 3:
-        i = low.find(needle, pos)
-        if i < 0:
-            break
-        chunk = text[max(0, i - before): i + after]
-        for e in extract_emails(chunk):
-            if e not in found:
-                found.append(e)
-        pos = i + len(needle)
-
-    return found
+    return result
 
 
-def web_research(
-    business_name, area, provider, key, daily_limit=200, timeout=8
-):
-    """{'socials': {...}, 'emails': [...], 'sites': [...]}"""
-    result = {"socials": {}, "emails": [], "sites": []}
+def find_email(website, timeout=6):
+    """Kept for compatibility: just the email."""
+    return scrape_contact_info(website, timeout)["email"]
+
+
+# ============================================================
+# OWNER FROM GOOGLE REVIEWS
+# ============================================================
+# Customers often write things like "Mike, the owner, came out"
+# or "owner John was great". Google's reviews (already returned by
+# the Places API, so no extra cost) are checked for such mentions.
+
+_NM = r"([A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})?)"
+
+REVIEW_P1 = re.compile(
+    _NM + r"\s*[,(\-–]?\s*(?:[Tt]he|[Oo]ur|[Tt]heir)?\s*"
+    r"(?:[Bb]usiness\s+|[Cc]ompany\s+)?\(?[Oo]wner\b"
+)
+REVIEW_P2 = re.compile(
+    r"\b[Oo]wners?\s*(?:,|:|-|–|named|called|is|was)?\s*(?:named\s+)?" + _NM
+)
+REVIEW_P3 = re.compile(
+    _NM + r"\s+(?:is|was)\s+(?:the|an?)\s+(?:\w+\s+)?[Oo]wner\b"
+)
+
+REVIEW_STOP = set("""
+the this that and but very great nice good excellent amazing friendly
+professional honest helpful awesome wonderful best super our their his
+her its home house business company shop small local family previous new
+current original called asked spoke talked met thanks thank contact
+contacted texted emailed hired using used plumber plumbers plumbing
+technician tech manager boss guy man mr mrs ms dr highly definitely
+absolutely also just then when after before while once today yesterday
+he she they we you not will would could should had has was were are
+service services owner owners
+""".split())
+
+REVIEW_CONTEXT_BAD = ("home", "house", "property", "building", "landlord")
+
+
+def _clean_review_name(raw):
+    words = raw.split()
+
+    while words and words[0].lower() in REVIEW_STOP:
+        words.pop(0)
+
+    if not words or any(w.lower() in REVIEW_STOP for w in words):
+        return ""
+
+    if len(words[0]) < 3:
+        return ""
+
+    return " ".join(words)
+
+
+def extract_review_owner_names(text):
+    names = []
+
+    for m in REVIEW_P1.finditer(text):
+        names.append(m.group(1))
+
+    for m in REVIEW_P2.finditer(text):
+        before = text[max(0, m.start() - 12):m.start()].lower()
+        if any(b in before for b in REVIEW_CONTEXT_BAD):
+            continue
+        names.append(m.group(1))
+
+    for m in REVIEW_P3.finditer(text):
+        names.append(m.group(1))
+
+    cleaned = [_clean_review_name(n) for n in names]
+    return [n for n in cleaned if n]
+
+
+def find_owner_in_reviews(reviews):
+    """Most-mentioned owner name in the reviews, or ""."""
+    counts = {}
+
+    for review in reviews or []:
+        text = (
+            (review.get("text") or {}).get("text")
+            or (review.get("originalText") or {}).get("text")
+            or ""
+        )
+        for name in extract_review_owner_names(text):
+            counts[name] = counts.get(name, 0) + 1
+
+    if not counts:
+        return ""
+
+    # "Mike" + "Mike Smith" -> count both for the longer name
+    for short in [n for n in counts if " " not in n]:
+        longer = [n for n in counts if n != short and n.startswith(short + " ")]
+        if longer:
+            counts[longer[0]] += counts.pop(short)
+
+    return sorted(
+        counts.items(),
+        key=lambda kv: (-kv[1], -len(kv[0].split()))
+    )[0][0]
+
+
+# ============================================================
+# OWNER FROM ONLINE PLUMBER DIRECTORIES (BBB, Yelp, Angi, ...)
+# ============================================================
+# For businesses without a website: search the web for the business
+# name, then read the directory profile pages (BBB, Angi, Yelp,
+# Facebook, ...) that belong to that business.
+
+DIRECTORY_SITES = {
+    "bbb.org": "BBB",
+    "yelp.com": "Yelp",
+    "angi.com": "Angi",
+    "thumbtack.com": "Thumbtack",
+    "homeadvisor.com": "HomeAdvisor",
+    "facebook.com": "Facebook",
+    "yellowpages.com": "Yellow Pages",
+    "manta.com": "Manta",
+    "mapquest.com": "MapQuest",
+    "chamberofcommerce.com": "Chamber of Commerce",
+    "porch.com": "Porch",
+    "buildzoom.com": "BuildZoom",
+    "superpages.com": "Superpages",
+    "alignable.com": "Alignable",
+    "linkedin.com": "LinkedIn",
+}
+
+_SEARCH_LOCK = threading.Semaphore(2)
+
+
+def _alnum(text):
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+
+def _name_key(business_name):
+    """Short comparable key of the business name (first 2 words)."""
+    words = re.findall(r"[A-Za-z0-9]+", business_name or "")
+    key = _alnum("".join(words[:2]))
+    return key if len(key) >= 6 else _alnum(business_name)
+
+
+def _directory_label(url):
+    host = urlparse(url).netloc.lower()
+    for domain, label in DIRECTORY_SITES.items():
+        if host == domain or host.endswith("." + domain):
+            return label
+    return ""
+
+
+def web_search(query, timeout=10):
+    """[(url, title, snippet), ...] from DuckDuckGo's HTML page."""
+    with _SEARCH_LOCK:
+        time.sleep(0.8)
+        try:
+            response = requests.get(
+                "https://html.duckduckgo.com/html/",
+                params={"q": query},
+                headers=REQUEST_HEADERS,
+                timeout=timeout
+            )
+        except requests.RequestException:
+            return []
+
+    if response.status_code != 200:
+        return []
+
+    page = response.text
+
+    link_tags = re.findall(
+        r'<a\b[^>]*class="[^"]*result__a[^"]*"[^>]*>(.*?)</a>',
+        page, re.S
+    )
+    link_attrs = re.findall(
+        r'<a\b([^>]*class="[^"]*result__a[^"]*"[^>]*)>', page
+    )
+    snippets = re.findall(
+        r'<a\b[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>',
+        page, re.S
+    )
+
+    results = []
+
+    for i, attrs in enumerate(link_attrs):
+        href_m = re.search(r'href="([^"]+)"', attrs)
+        if not href_m:
+            continue
+
+        href = html.unescape(href_m.group(1))
+
+        if href.startswith("//"):
+            href = "https:" + href
+
+        if "uddg=" in href:
+            qs = parse_qs(urlparse(href).query)
+            href = unquote(qs.get("uddg", [""])[0])
+
+        if not href.startswith("http"):
+            continue
+
+        strip = lambda t: html.unescape(re.sub(r"<[^>]+>", " ", t)).strip()
+
+        title = strip(link_tags[i]) if i < len(link_tags) else ""
+        snippet = strip(snippets[i]) if i < len(snippets) else ""
+        results.append((href, title, snippet))
+
+    return results
+
+
+def _location_hint(address):
+    parts = [p.strip() for p in (address or "").split(",")]
+
+    if len(parts) >= 3:
+        state = parts[-2].split()[0] if parts[-2].split() else ""
+        return f"{parts[-3]} {state}".strip()
+
+    return address or ""
+
+
+def find_owner_online(business_name, address, timeout=8, max_pages=3):
+    """(owner_name, role, source) from directory pages, or ("","","")."""
+    if not business_name:
+        return "", "", ""
+
+    query = f'"{business_name}" {_location_hint(address)} owner'
+    key = _name_key(business_name)
 
     if not key:
-        return result
+        return "", "", ""
 
-    tokens = _name_tokens(business_name)
-    to_fetch = []
+    candidates = []   # (priority, name, role, source)
+    pages_read = 0
 
-    def handle(items):
-        for item in items:
-            link = item.get("link", "") or ""
-            blob = (
-                f"{item.get('title', '')} {item.get('snippet', '')} {link}"
-            )
+    for url, title, snippet in web_search(query):
 
-            if not _matches_business(blob, tokens):
-                continue
+        label = _directory_label(url)
 
-            host = _host(link)
+        # 1) the search snippet itself ("Owner: John Smith ...")
+        if key in _alnum(title + snippet):
+            for pr, nm, rl in extract_owners(f"<p>{title}</p><p>{snippet}</p>"):
+                candidates.append((pr, nm, rl, label or urlparse(url).netloc))
 
-            if host and host not in result["sites"]:
-                result["sites"].append(host)
-
-            for platform, url in extract_socials(link).items():
-                result["socials"].setdefault(platform, url)
-
-            snippet_text = (
-                f"{item.get('title', '')}. {item.get('snippet', '')}"
-            )
-            for e in extract_emails(snippet_text):
-                dom = e.split("@")[-1]
-                if any(dom.endswith(d) for d in DIRECTORY_EMAIL_DOMAINS):
-                    continue
-                if e not in result["emails"]:
-                    result["emails"].append(e)
-
-            if (
-                host
-                and not any(
-                    host == d or host.endswith("." + d)
-                    for d in NO_FETCH_HOSTS
-                )
-                and link not in to_fetch
-            ):
-                to_fetch.append(link)
-
-    def run(query):
-        if not _take_search_slot(daily_limit):
-            return []
-        return _search_web(query, provider, key)
-
-    handle(run(f'"{business_name}" {area}'))
-
-    # Nothing social yet -> one more, social-focused search.
-    if not any(p in result["socials"] for p in ("Facebook", "Instagram")):
-        handle(run(f'"{business_name}" {area} facebook instagram'))
-
-    # Still no email -> read the matching listing pages.
-    if not result["emails"]:
-        for link in to_fetch[:3]:
+        # 2) the business's own profile page on a directory site
+        if label and key in _alnum(url) and pages_read < max_pages:
+            pages_read += 1
             try:
                 resp = requests.get(
-                    link,
+                    url,
                     headers=REQUEST_HEADERS,
                     timeout=timeout,
                     allow_redirects=True
@@ -531,113 +575,53 @@ def web_research(
             except requests.RequestException:
                 continue
 
-            if resp.status_code != 200 or "text" not in resp.headers.get(
+            if resp.status_code == 200 and "text" in resp.headers.get(
                 "Content-Type", ""
             ):
-                continue
+                for pr, nm, rl in extract_owners(resp.text[:500000]):
+                    candidates.append((pr, nm, rl, label))
 
-            page_host = _host(link)
-            page_root = ".".join(page_host.split(".")[-2:])
+    if not candidates:
+        return "", "", ""
 
-            for e in _emails_near_name(resp.text[:500000], business_name):
-                dom = e.split("@")[-1]
-                if dom.endswith(page_root):
-                    continue
-                if any(dom.endswith(d) for d in DIRECTORY_EMAIL_DOMAINS):
-                    continue
-                if e not in result["emails"]:
-                    result["emails"].append(e)
-
-            if result["emails"]:
-                break
-
-    result["sites"] = result["sites"][:6]
-    return result
+    candidates.sort(key=lambda c: c[0])
+    _, name, role, source = candidates[0]
+    return name, role, source
 
 
-# ============================================================
-# REVIEW QUALITY / SERVICE ISSUES
-# ============================================================
-# Google Places returns at most 5 reviews per business, so the
-# "issues" part only reflects those recent reviews (low-rated ones).
+def _enrich_lead(lead):
+    """Fills Email / Owner Name / Owner Role / Owner Source."""
+    reviews = lead.pop("_reviews", [])
+    site = lead["Website"] if lead["Website"] != "NO WEBSITE" else ""
 
-ISSUE_PATTERNS = (
-    ("Late / no-show", re.compile(
-        r"\b(?:late|no[- ]?show|never (?:showed|came|arrived)|"
-        r"(?:didn'?t|did not|never) (?:show|come|arrive)|"
-        r"waited|reschedul\w*|delay\w*)\b", re.I)),
-    ("Pricing / overcharging", re.compile(
-        r"\b(?:overcharg\w*|over[- ]?priced|rip(?:ped)?[- ]?off|"
-        r"too expensive|hidden fees?|extra charges?|scam\w*)\b", re.I)),
-    ("Poor communication / rude", re.compile(
-        r"\b(?:no response|never (?:called|responded|returned|answered)|"
-        r"(?:didn'?t|did not) (?:call|respond|return|answer)|"
-        r"unresponsive|ghost\w*|rude|unprofessional|"
-        r"disrespectful)\b", re.I)),
-    ("Poor work quality", re.compile(
-        r"\b(?:poor quality|shoddy|sloppy|botched|"
-        r"(?:not|never|wasn'?t) (?:fixed|repaired|resolved)|"
-        r"still (?:leak\w*|broken|not working)|"
-        r"had to (?:redo|call someone else|hire)|"
-        r"damage[d]?|made (?:it|things) worse)\b", re.I)),
-)
+    email = owner = role = source = ""
 
-
-def _review_text(review):
-    return (
-        (review.get("text") or {}).get("text", "")
-        or (review.get("originalText") or {}).get("text", "")
-        or ""
-    )
-
-
-def review_quality(rating, count, reviews):
-    """'Good (4.6★, 133 reviews) | Issues: Late / no-show (2 of 5 ...)'"""
     try:
-        r = float(rating)
-    except (TypeError, ValueError):
-        return "NO RATING"
+        if site:
+            info = scrape_contact_info(site)
+            email = info["email"]
+            if info["owner_name"]:
+                owner, role, source = (
+                    info["owner_name"], info["owner_role"], "Website"
+                )
 
-    if r >= 4.5:
-        label = "Excellent"
-    elif r >= 4.0:
-        label = "Good"
-    elif r >= 3.5:
-        label = "Average"
-    else:
-        label = "Poor"
+        if not owner:
+            from_reviews = find_owner_in_reviews(reviews)
+            if from_reviews:
+                owner, role, source = from_reviews, "Owner", "Google Reviews"
 
-    head = f"{label} ({r:.1f}\u2605"
-    if count not in (None, ""):
-        head += f", {count} reviews"
-    head += ")"
+        if not owner:
+            owner, role, source = find_owner_online(
+                lead.get("Business Name", ""),
+                lead.get("Address", "")
+            )
+    except Exception:
+        pass
 
-    reviews = reviews or []
-
-    if not reviews:
-        return head + " | No review text available"
-
-    low = [
-        rv for rv in reviews
-        if (rv.get("rating") if rv.get("rating") is not None else 5) <= 3
-    ]
-
-    if not low:
-        return head + " | No issues in recent reviews"
-
-    issues = []
-    for rv in low:
-        text = _review_text(rv)
-        for name, pattern in ISSUE_PATTERNS:
-            if name not in issues and pattern.search(text):
-                issues.append(name)
-
-    ratio = f"{len(low)} of {len(reviews)} recent reviews \u22643\u2605"
-
-    if issues:
-        return f"{head} | Issues: {', '.join(issues)} ({ratio})"
-
-    return f"{head} | Low ratings, reason unclear ({ratio})"
+    lead["Email"] = email or ("NOT FOUND" if site else "NO WEBSITE")
+    lead["Owner Name"] = owner or "NOT FOUND"
+    lead["Owner Role"] = role or "NOT FOUND"
+    lead["Owner Source"] = source or "NOT FOUND"
 
 
 # ============================================================
@@ -747,7 +731,6 @@ def add_competitor_columns(
     return df
 
 
-
 # ============================================================
 # GOOGLE PLACES SEARCH
 # ============================================================
@@ -757,11 +740,7 @@ def search_google_maps(
     business_type,
     location,
     only_no_website=False,
-    page_token=None,
-    area="",
-    search_provider="serper",
-    search_key=None,
-    daily_limit=200
+    page_token=None
 ):
 
     URL = "https://places.googleapis.com/v1/places:searchText"
@@ -888,85 +867,25 @@ def search_google_maps(
             "Business Name": name,
             "Phone Number": phone,
             "Email": "",
-            "Social Media Presence": "",
-            "Listed On": "",
+            "Owner Name": "",
+            "Owner Role": "",
+            "Owner Source": "",
             "Address": address,
             "Website": website if website else "NO WEBSITE",
             "Rating": rating,
             "Reviews": reviews_text,
-            "Review Quality / Service Issues": review_quality(
-                rating,
-                place.get("userRatingCount", None),
-                place.get("reviews", [])
-            ),
             "Place ID": place_id,
             "Google Maps": google_maps_link,
             "Latitude": loc.get("latitude"),
-            "Longitude": loc.get("longitude")
+            "Longitude": loc.get("longitude"),
+            "_reviews": place.get("reviews", [])
         })
 
-    # Look up emails on the business websites (in parallel for speed)
-    sites = [
-        lead["Website"] if lead["Website"] != "NO WEBSITE" else ""
-        for lead in leads
-    ]
-
-    scans = [("", {})] * len(leads)
-
-    if sites:
+    # Email + owner lookup (website, Google reviews, online
+    # directories) - in parallel for speed
+    if leads:
         with ThreadPoolExecutor(max_workers=10) as pool:
-            scans = list(pool.map(scan_website, sites))
-
-    research_on = bool(search_key)
-
-    # Which leads still miss an email or social profile after the
-    # website scan? (Includes businesses without a website.)
-    todo = []
-
-    if research_on:
-        for idx, (site, (email, socials)) in enumerate(zip(sites, scans)):
-            if not site or not email or not socials:
-                todo.append(idx)
-
-    researched = {}
-
-    if todo:
-        with ThreadPoolExecutor(max_workers=5) as pool:
-            outs = list(pool.map(
-                lambda i: web_research(
-                    leads[i]["Business Name"], area,
-                    search_provider, search_key, daily_limit
-                ),
-                todo
-            ))
-        researched = dict(zip(todo, outs))
-
-    for idx, (lead, site, (email, socials)) in enumerate(
-        zip(leads, sites, scans)
-    ):
-        found = researched.get(idx, {"socials": {}, "emails": [], "sites": []})
-
-        all_socials = dict(socials)
-        for p, u in found["socials"].items():
-            all_socials.setdefault(p, u)
-
-        best_email = email or (found["emails"][0] if found["emails"] else "")
-
-        if best_email:
-            lead["Email"] = best_email
-        elif not site and not research_on:
-            lead["Email"] = "NO WEBSITE"
-        else:
-            lead["Email"] = "NOT FOUND"
-
-        if all_socials:
-            lead["Social Media Presence"] = format_socials(all_socials)
-        elif not site and not research_on:
-            lead["Social Media Presence"] = "NO WEBSITE"
-        else:
-            lead["Social Media Presence"] = "NOT FOUND"
-
-        lead["Listed On"] = ", ".join(found["sites"])
+            list(pool.map(_enrich_lead, leads))
 
     next_page_token = result.get("nextPageToken")
 
