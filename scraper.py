@@ -112,7 +112,7 @@ def add_competitor_columns(
     - "Nearby Competitors": same business type within radius_km,
       nearest first -> "Name (1.2 km) | Name (2.0 km)"
     - "Competitors With Well-Designed Websites": nearby competitors
-      that HAVE a website, best rated first -> "Name - https://..."
+      that HAVE a website -> only the best rated one's link (clickable)
     """
     df = df.copy()
     nearby_col, web_col = [], []
@@ -151,10 +151,11 @@ def add_competitor_columns(
         with_site = [(d, o) for d, o in cands if _has_website(o)]
         with_site.sort(key=lambda x: (-_rating(x[1]), x[0]))
 
-        web_col.append(" | ".join(
-            f"{o.get('Business Name', '')} - {o.get('Website', '')}"
-            for d, o in with_site[:max_with_website]
-        ))
+        # Only the website link of the best nearby competitor, so the
+        # cell is a single clickable link.
+        web_col.append(
+            with_site[0][1].get("Website", "") if with_site else ""
+        )
 
     df["Nearby Competitors"] = nearby_col
     df["Competitors With Well-Designed Websites"] = web_col

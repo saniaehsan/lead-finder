@@ -677,9 +677,11 @@ if not st.session_state["leads"].empty:
                 width="large"
             ),
             "Competitors With Well-Designed Websites":
-                st.column_config.TextColumn(
+                st.column_config.LinkColumn(
                     "Competitors With Well-Designed Websites",
-                    width="large"
+                    display_text=r"https?://(?:www\.)?([^/]+)",
+                    width="large",
+                    help="Click to open the competitor's website"
                 ),
             "Open Website": st.column_config.LinkColumn(
                 "Open Website",
@@ -713,7 +715,8 @@ if not st.session_state["leads"].empty:
 
         for col_name, label in (
             ("Google Maps", "Open in Maps"),
-            ("Website", None)
+            ("Website", None),
+            ("Competitors With Well-Designed Websites", None)
         ):
             if col_name not in headers:
                 continue
