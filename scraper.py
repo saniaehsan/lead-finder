@@ -109,8 +109,8 @@ def add_competitor_columns(
 ):
     """Adds two columns using all saved leads as the pool:
 
-    - "Nearby Competitors": same business type within radius_km,
-      nearest first -> "Name (1.2 km) | Name (2.0 km)"
+    - "Nearby Competitors": same business type, ONLY ones with a
+      website, within radius_km, nearest first -> "Name (1.2 km) | Name (2.0 km)"
     - "Competitors With Well-Designed Websites": nearby competitors
       that HAVE a website -> only the best rated one's link (clickable)
     """
@@ -134,6 +134,9 @@ def add_competitor_columns(
                 continue
             if other.get("Business Type") != rec.get("Business Type"):
                 continue
+            # Only competitors that actually have a website.
+            if not _has_website(other):
+                continue
             pt = _coords(other)
             if pt is None:
                 continue
@@ -148,7 +151,7 @@ def add_competitor_columns(
             for d, o in cands[:max_nearby]
         ))
 
-        with_site = [(d, o) for d, o in cands if _has_website(o)]
+        with_site = list(cands)
         with_site.sort(key=lambda x: (-_rating(x[1]), x[0]))
 
         # Only the website link of the best nearby competitor, so the
