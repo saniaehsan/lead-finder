@@ -31,6 +31,11 @@ if "searches" not in st.session_state:
 if "search_progress" not in st.session_state:
     st.session_state["search_progress"] = {}
 
+# Website wale businesses (leads me nahi dikhte) - sirf competitor
+# columns ke liye use hote hain.
+if "competitor_pool" not in st.session_state:
+    st.session_state["competitor_pool"] = []
+
 
 # ============================================================
 # STATIC US GEO DATA (State -> County -> Cities / Landmarks)
@@ -224,26 +229,10 @@ business_type = st.selectbox(
 # RESULT FILTERS (applied to the saved results table below)
 # ============================================================
 
-col1, col2 = st.columns(2)
-
-with col1:
-
-    website_filter = st.selectbox(
-        "Website Filter",
-        [
-            "All",
-            "Only No Website",
-            "Only With Website"
-        ],
-        index=1
-    )
-
-with col2:
-
-    phone_filter = st.checkbox(
-        "Only businesses with phone numbers",
-        value=True
-    )
+phone_filter = st.checkbox(
+    "Only businesses with phone numbers",
+    value=True
+)
 
 
 # ============================================================
@@ -360,14 +349,13 @@ if st.button(
             )
 
             with st.spinner(
-                f"Searching Page {page_number} and finding emails & owners..."
+                f"Searching Page {page_number} and no-website businesses only..."
             ):
 
                 result = scraper.search_google_maps(
                     api_key=api_key,
                     business_type=business_type,
                     location=location,
-                    only_no_website=False,
                     page_token=page_token
                 )
 
@@ -390,6 +378,19 @@ if st.button(
                     "leads",
                     []
                 )
+
+                # Website wale businesses: leads me nahi, sirf
+                # competitor pool me save hote hain.
+                known_ids = {
+                    c.get("Place ID")
+                    for c in st.session_state["competitor_pool"]
+                }
+
+                for comp in result.get("competitors", []):
+                    if comp.get("Place ID") in known_ids:
+                        continue
+                    comp["Business Type"] = business_type
+                    st.session_state["competitor_pool"].append(comp)
 
                 if leads:
 
@@ -563,9 +564,11 @@ if not st.session_state["leads"].empty:
         .copy()
     )
 
-    # Competitors are calculated from ALL saved leads (before the
-    # filters below), so filtering does not remove competitors.
-    df = scraper.add_competitor_columns(df)
+    # Competitors: saved leads + website wale competitor pool.
+    df = scraper.add_competitor_columns(
+        df,
+        st.session_state["competitor_pool"]
+    )
 
     st.divider()
 
@@ -575,26 +578,6 @@ if not st.session_state["leads"].empty:
     )
 
     filtered_df = df.copy()
-
-    if website_filter == "Only No Website":
-
-        filtered_df = filtered_df[
-            filtered_df["Website"]
-            .fillna("")
-            .astype(str)
-            .str.upper()
-            == "NO WEBSITE"
-        ]
-
-    elif website_filter == "Only With Website":
-
-        filtered_df = filtered_df[
-            filtered_df["Website"]
-            .fillna("")
-            .astype(str)
-            .str.upper()
-            != "NO WEBSITE"
-        ]
 
     if phone_filter:
 
@@ -632,10 +615,6 @@ if not st.session_state["leads"].empty:
         )
     ]
 
-    # Streamlit's LinkColumn styles EVERY cell as a link, even
-    # the text "NO WEBSITE". So the Website column is shown as
-    # plain text, and a separate "Open Website" column holds the
-    # clickable link (empty when there is no website).
     # Latitude / Longitude are only used for distance maths.
     filtered_df = filtered_df.drop(
         columns=["Latitude", "Longitude"],
@@ -643,19 +622,6 @@ if not st.session_state["leads"].empty:
     )
 
     display_df = filtered_df.copy()
-
-    website_col_pos = list(display_df.columns).index("Website") + 1
-
-    display_df.insert(
-        website_col_pos,
-        "Open Website",
-        display_df["Website"].where(
-            display_df["Website"].astype(str).str.lower().str.startswith(
-                ("http://", "https://")
-            ),
-            None
-        )
-    )
 
     st.dataframe(
         display_df,
@@ -688,11 +654,6 @@ if not st.session_state["leads"].empty:
                     width="large",
                     help="Click to open the competitor's website"
                 ),
-            "Open Website": st.column_config.LinkColumn(
-                "Open Website",
-                display_text="Open Website",
-                help="Click to open the business website in a new tab"
-            ),
             "Google Maps": st.column_config.LinkColumn(
                 "Google Maps",
                 display_text="Open in Maps",
@@ -767,5 +728,9 @@ if not st.session_state["leads"].empty:
         st.session_state[
             "search_progress"
         ] = {}
+
+        st.session_state[
+            "competitor_pool"
+        ] = []
 
         st.rerun()

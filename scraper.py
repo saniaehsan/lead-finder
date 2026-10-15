@@ -590,38 +590,10 @@ def find_owner_online(business_name, address, timeout=8, max_pages=3):
 
 
 def _enrich_lead(lead):
-    """Fills Email / Owner Name / Owner Role / Owner Source."""
-    reviews = lead.pop("_reviews", [])
-    site = lead["Website"] if lead["Website"] != "NO WEBSITE" else ""
-
-    email = owner = role = source = ""
-
-    try:
-        if site:
-            info = scrape_contact_info(site)
-            email = info["email"]
-            if info["owner_name"]:
-                owner, role, source = (
-                    info["owner_name"], info["owner_role"], "Website"
-                )
-
-        if not owner:
-            from_reviews = find_owner_in_reviews(reviews)
-            if from_reviews:
-                owner, role, source = from_reviews, "Owner", "Google Reviews"
-
-        if not owner:
-            owner, role, source = find_owner_online(
-                lead.get("Business Name", ""),
-                lead.get("Address", "")
-            )
-    except Exception:
-        pass
-
-    lead["Email"] = email or ("NOT FOUND" if site else "NO WEBSITE")
-    lead["Owner Name"] = owner or "NOT FOUND"
-    lead["Owner Role"] = role or "NOT FOUND"
-    lead["Owner Source"] = source or "NOT FOUND"
+    """Reviews hata deta hai; sab leads no-website hain, isliye Email
+    hamesha "NO WEBSITE" hota hai. (Owner lookup hata diya gaya.)"""
+    lead.pop("_reviews", None)
+    lead["Email"] = "NO WEBSITE"
 
 
 # ============================================================
@@ -669,6 +641,7 @@ def _rating(rec):
 
 def add_competitor_columns(
     df,
+    extra_pool=None,
     radius_km=5,
     max_nearby=5,
     max_with_website=3
@@ -684,6 +657,7 @@ def add_competitor_columns(
     nearby_col, web_col = [], []
 
     records = df.to_dict("records")
+    pool = records + list(extra_pool or [])
 
     for i, rec in enumerate(records):
         me = _coords(rec)
@@ -695,8 +669,8 @@ def add_competitor_columns(
 
         cands = []
 
-        for j, other in enumerate(records):
-            if j == i or other.get("Place ID") == rec.get("Place ID"):
+        for other in pool:
+            if other.get("Place ID") == rec.get("Place ID"):
                 continue
             if other.get("Business Type") != rec.get("Business Type"):
                 continue
@@ -739,7 +713,6 @@ def search_google_maps(
     api_key,
     business_type,
     location,
-    only_no_website=False,
     page_token=None
 ):
 
@@ -784,6 +757,7 @@ def search_google_maps(
             "success": False,
             "error": str(e),
             "leads": [],
+            "competitors": [],
             "next_page_token": None
         }
 
@@ -792,12 +766,14 @@ def search_google_maps(
             "success": False,
             "error": response.text,
             "leads": [],
+            "competitors": [],
             "next_page_token": None
         }
 
     result = response.json()
     places = result.get("places", [])
     leads = []
+    competitors = []
 
     for place in places:
 
@@ -852,7 +828,19 @@ def search_google_maps(
             place.get("reviews", [])
         )
 
-        if only_no_website and website:
+        # Sirf "NO WEBSITE" wale leads rakhne hain. Website wale
+        # businesses leads me nahi aate, lekin competitor pool me
+        # jate hain (competitor columns ke liye) - bina enrichment ke.
+        if website:
+            loc_c = place.get("location", {}) or {}
+            competitors.append({
+                "Business Name": name,
+                "Website": website,
+                "Rating": rating,
+                "Place ID": place_id,
+                "Latitude": loc_c.get("latitude"),
+                "Longitude": loc_c.get("longitude")
+            })
             continue
 
         google_maps_link = build_maps_link(
@@ -867,9 +855,6 @@ def search_google_maps(
             "Business Name": name,
             "Phone Number": phone,
             "Email": "",
-            "Owner Name": "",
-            "Owner Role": "",
-            "Owner Source": "",
             "Address": address,
             "Website": website if website else "NO WEBSITE",
             "Rating": rating,
@@ -892,6 +877,7 @@ def search_google_maps(
     return {
         "success": True,
         "leads": leads,
+        "competitors": competitors,
         "total_results_checked": len(places),
         "next_page_token": next_page_token,
         "has_more_pages": bool(next_page_token)
