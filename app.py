@@ -643,6 +643,14 @@ if not st.session_state["leads"].empty:
             "Reviews": st.column_config.TextColumn(
                 "Reviews"
             ),
+            "Review Quality / Service Issues":
+                st.column_config.TextColumn(
+                    "Review Quality / Service Issues",
+                    width="large",
+                    help="Google reviews summary + what the cold "
+                         "caller should say. Double-click a cell to "
+                         "read the full text."
+                ),
             "Nearby Competitors": st.column_config.TextColumn(
                 "Nearby Competitors",
                 width="large"
@@ -698,6 +706,20 @@ if not st.session_state["leads"].empty:
                     if label:
                         cell.value = label
                     cell.style = "Hyperlink"
+
+        # Review column: wide + wrapped so the talking point is readable
+        if "Review Quality / Service Issues" in headers:
+            from openpyxl.styles import Alignment
+            from openpyxl.utils import get_column_letter
+
+            rq_idx = headers.index("Review Quality / Service Issues") + 1
+            ws.column_dimensions[get_column_letter(rq_idx)].width = 80
+
+            for row in range(2, ws.max_row + 1):
+                ws.cell(row=row, column=rq_idx).alignment = Alignment(
+                    wrap_text=True,
+                    vertical="top"
+                )
 
     st.download_button(
         label="EXPORT LEADS TO EXCEL",

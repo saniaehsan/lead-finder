@@ -589,10 +589,194 @@ def find_owner_online(business_name, address, timeout=8, max_pages=3):
     return name, role, source
 
 
+# ============================================================
+# REVIEW QUALITY / SERVICE ISSUES (cold-caller talking points)
+# ============================================================
+# Google Places API sirf max 5 reviews deta hai, isliye analysis
+# overall rating + in 5 sampled reviews par based hai. Keywords
+# English reviews ke liye hain.
+
+# (label, regex, website-based fix jo pitch me use hoga)
+REVIEW_ISSUES = [
+    (
+        "late / no-show",
+        r"\blate\b|no[- ]show|never (showed|came|arrived)|"
+        r"(didn.?t|did not) (show|come|arrive)|\bwaited\b|\bdelay|"
+        r"reschedul|\bcancel|stood me up|took (forever|too long)",
+        "online booking with clear time slots and confirmations"
+    ),
+    (
+        "bad communication / calls not returned",
+        r"call(ed)?\s*back|callback|no (response|reply|answer)|"
+        r"unresponsive|never (answer|respond|repl|got back)|"
+        r"(didn.?t|did not) (answer|respond|reply|return)|"
+        r"hard to reach|unreachable|ghost|voicemail",
+        "a contact / quote-request form so no inquiry gets missed"
+    ),
+    (
+        "pricing / overcharging",
+        r"overcharg|expensive|over[- ]?priced|rip[- ]?off|"
+        r"hidden (fee|charge|cost)|price gouging|too much|"
+        r"extra charge|charged (me )?(more|extra)|\bscam",
+        "a transparent services & pricing page"
+    ),
+    (
+        "poor quality of work",
+        r"poor (quality|job|work|service)|low quality|shoddy|sloppy|"
+        r"bad (job|work|service)|terrible|awful|horrible|botched|"
+        r"(not|didn.?t|did not) (fix|fixed)|still (broken|leaking|not working)|"
+        r"\bbroke\b|damage|\bredo\b|incomplete|unfinished|mistake|\bwrong\b",
+        "a photo gallery / before-after work and guarantees"
+    ),
+    (
+        "rude / unprofessional",
+        r"\brude\b|unprofessional|disrespect|attitude|arrogant|"
+        r"yelled|screamed|dismissive",
+        "an About page that shows the team and builds trust"
+    ),
+]
+
+REVIEW_PRAISE = [
+    ("professionalism", r"profession"),
+    ("fast / on-time service", r"on time|prompt|punctual|quick|fast|timely"),
+    ("friendly staff", r"friendly|polite|courteous|kind|helpful"),
+    ("fair pricing", r"fair price|affordable|reasonable|great price|honest"),
+    ("quality work", r"great job|excellent work|amazing|quality|perfect"),
+]
+
+
+def _review_text(review):
+    text = review.get("text") or review.get("originalText") or {}
+
+    if isinstance(text, dict):
+        text = text.get("text", "")
+
+    return str(text or "").lower()
+
+
+def analyze_reviews(reviews, rating, review_count):
+    """One-cell summary for the cold caller:
+    QUALITY (rating) | negative reviews | Issues | Talking point."""
+    reviews = reviews or []
+
+    try:
+        rating = float(rating) if rating not in (None, "") else None
+    except (TypeError, ValueError):
+        rating = None
+
+    try:
+        review_count = int(review_count or 0)
+    except (TypeError, ValueError):
+        review_count = 0
+
+    # ---- no reviews / almost none ----
+    if rating is None or review_count == 0:
+        return (
+            "NO REVIEWS YET | Talking point: Nobody can judge this "
+            "business online - no reviews and no website. Pitch a "
+            "website to build credibility and trust with people "
+            "searching for the service."
+        )
+
+    # ---- overall quality from rating ----
+    if rating >= 4.5:
+        quality = "STRONG"
+    elif rating >= 4.0:
+        quality = "GOOD"
+    elif rating >= 3.5:
+        quality = "MIXED"
+    else:
+        quality = "POOR"
+
+    # ---- sampled reviews: negative (<=3 stars) and positive ----
+    negative = [r for r in reviews if (r.get("rating") or 5) <= 3]
+    positive = [r for r in reviews if (r.get("rating") or 0) >= 4]
+
+    # issues: kitne negative reviews me kya complaint hai
+    issue_counts = []
+    for label, pattern, fix in REVIEW_ISSUES:
+        hits = sum(
+            1 for r in negative
+            if re.search(pattern, _review_text(r))
+        )
+        if hits:
+            issue_counts.append((hits, label, fix))
+
+    issue_counts.sort(key=lambda x: -x[0])
+    top_issues = issue_counts[:3]
+
+    praise_counts = []
+    for label, pattern in REVIEW_PRAISE:
+        hits = sum(
+            1 for r in positive
+            if re.search(pattern, _review_text(r))
+        )
+        if hits:
+            praise_counts.append((hits, label))
+
+    praise_counts.sort(key=lambda x: -x[0])
+    top_praise = [label for _, label in praise_counts[:2]]
+
+    # ---- build the cell ----
+    parts = [f"{quality} ({rating:.1f}\u2605)"]
+
+    if reviews:
+        parts.append(
+            f"{len(negative)} of {len(reviews)} sampled reviews negative"
+        )
+
+    if top_issues:
+        parts.append(
+            "Issues: " + ", ".join(label for _, label, _ in top_issues)
+        )
+    elif negative:
+        parts.append("Issues: complaints without a clear pattern")
+
+    # ---- talking point ----
+    if top_issues:
+        issues_txt = " and ".join(label for _, label, _ in top_issues[:2])
+        fixes_txt = "; ".join(fix for _, _, fix in top_issues[:2])
+        point = (
+            f"Customers complain about {issues_txt}. Pitch: a website "
+            f"with {fixes_txt} fixes these problems and rebuilds trust."
+        )
+    elif quality in ("POOR", "MIXED"):
+        point = (
+            "Reviews are not great. Pitch: a website with service "
+            "details, testimonials and easy contact gives new customers "
+            "a better first impression than the Google reviews alone."
+        )
+    else:
+        praise_txt = (
+            f" (customers praise {' and '.join(top_praise)})"
+            if top_praise else ""
+        )
+        point = (
+            f"Happy customers{praise_txt}, but with no website, people "
+            "who Google them can't see proof of this work or book "
+            "online and go to competitors who have a site. Pitch: "
+            "turn these reviews into a website that wins those customers."
+        )
+
+    if review_count < 10:
+        point += " (Few reviews - business is still small/new.)"
+
+    parts.append("Talking point: " + point)
+
+    return " | ".join(parts)
+
+
 def _enrich_lead(lead):
-    """Reviews hata deta hai; sab leads no-website hain, isliye Email
-    hamesha "NO WEBSITE" hota hai. (Owner lookup hata diya gaya.)"""
-    lead.pop("_reviews", None)
+    """Review analysis fill karta hai; sab leads no-website hain,
+    isliye Email hamesha "NO WEBSITE" hota hai."""
+    reviews = lead.pop("_reviews", [])
+    review_count = lead.pop("_review_count", 0)
+
+    lead["Review Quality / Service Issues"] = analyze_reviews(
+        reviews,
+        lead.get("Rating"),
+        review_count
+    )
     lead["Email"] = "NO WEBSITE"
 
 
@@ -859,11 +1043,13 @@ def search_google_maps(
             "Website": website if website else "NO WEBSITE",
             "Rating": rating,
             "Reviews": reviews_text,
+            "Review Quality / Service Issues": "",
             "Place ID": place_id,
             "Google Maps": google_maps_link,
             "Latitude": loc.get("latitude"),
             "Longitude": loc.get("longitude"),
-            "_reviews": place.get("reviews", [])
+            "_reviews": place.get("reviews", []),
+            "_review_count": place.get("userRatingCount", 0)
         })
 
     # Email + owner lookup (website, Google reviews, online
