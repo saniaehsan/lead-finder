@@ -138,6 +138,8 @@ privacy policy terms all rights reserved new york north south east west
 county city dental dentist salon gym hotel restaurant auto real estate
 agents marketing agency lawyers law firm attorney attorneys senior chief
 executive officer and of for with from your view read more learn
+cleaning cleaners cleaner janitorial maid maids maintenance commercial
+residential office carpet window pressure washing
 """.split())
 
 SEP = r"\s*[,\-–—|:(]\s*(?i:the\s+)?"
@@ -355,7 +357,8 @@ contacted texted emailed hired using used plumber plumbers plumbing
 technician tech manager boss guy man mr mrs ms dr highly definitely
 absolutely also just then when after before while once today yesterday
 he she they we you not will would could should had has was were are
-service services owner owners
+service services owner owners cleaning cleaners cleaner maid maids
+janitorial
 """.split())
 
 REVIEW_CONTEXT_BAD = ("home", "house", "property", "building", "landlord")

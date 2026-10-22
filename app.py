@@ -215,7 +215,9 @@ business_options = [
     "Hotels",
     "Auto Repair Shops",
     "Marketing Agencies",
-    "Lawyers"
+    "Lawyers",
+    "Residential Cleaning Services",
+    "Commercial Cleaning Services"
 ]
 
 business_type = st.selectbox(
