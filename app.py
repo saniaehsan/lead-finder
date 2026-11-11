@@ -86,16 +86,6 @@ with st.sidebar:
         type="password"
     )
 
-    st.header("Recent Post (optional)")
-
-    serpapi_key = st.text_input(
-        "SerpApi Key",
-        type="password",
-        help="Google Places API owner posts nahi deta. 'Recent Post' "
-             "column ke liye SerpApi (serpapi.com) ki key chahiye. "
-             "Khali chhorein to column 'Not checked' dikhayega."
-    )
-
 
 # ============================================================
 # COUNTRY
@@ -255,6 +245,13 @@ website_filter_label = st.selectbox(
 
 website_filter = WEBSITE_FILTER_OPTIONS[website_filter_label]
 
+check_recent_post = st.checkbox(
+    "Check Recent Post (slow: ~5-10 sec per lead)",
+    value=False,
+    help="Har lead ka Google Maps page browser me khol kar 'From the "
+         "owner' post ki age nikalta hai. Bina API key ke, lekin slow."
+)
+
 
 # ============================================================
 # RESULT FILTERS (applied to the saved results table below)
@@ -390,7 +387,7 @@ if st.button(
                     location=location,
                     page_token=page_token,
                     website_filter=website_filter,
-                    serpapi_key=serpapi_key
+                    check_recent_post=check_recent_post
                 )
 
             if not result.get("success", False):

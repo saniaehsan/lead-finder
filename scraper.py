@@ -4,7 +4,6 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 import requests
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
@@ -795,7 +794,7 @@ def analyze_reviews(reviews, rating, review_count, has_website=False):
     return " | ".join(parts)
 
 
-def _enrich_lead(lead, serpapi_key=""):
+def _enrich_lead(lead):
     """Review analysis + Email + Recent Post fill karta hai."""
     reviews = lead.pop("_reviews", [])
     review_count = lead.pop("_review_count", 0)
@@ -814,98 +813,52 @@ def _enrich_lead(lead, serpapi_key=""):
     else:
         lead["Email"] = "NO WEBSITE"
 
-    lead["Recent Post"] = fetch_recent_post(
-        serpapi_key,
-        lead.get("Place ID"),
-        lead.get("Business Name", ""),
-        lead.get("Address", "")
+    lead["Recent Post"] = "Not checked"
+
+
+# ============================================================
+# RECENT POST (Google Maps "From the owner" - bina API key)
+# ============================================================
+# recent_post.py Playwright se Maps page kholta hai (alag process me).
+
+def fetch_recent_posts(leads):
+    """leads ki list me "Recent Post" fill karta hai (in place)."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    items = [
+        {"id": l["Place ID"], "link": l["Google Maps"]}
+        for l in leads if l.get("Place ID")
+    ]
+
+    if not items:
+        return
+
+    script = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "recent_post.py"
     )
 
-
-# ============================================================
-# RECENT POST (Google Maps "From the owner" posts)
-# ============================================================
-# Google Places API (official) owner posts return NAHI karta, isliye
-# yeh SerpApi ke "Google Maps Posts" API se aata hai (alag API key,
-# paid after free quota). Har lead ke liye 1-2 SerpApi searches lagti
-# hain: (1) place ka data_id, (2) us data_id ki posts.
-
-SERPAPI_URL = "https://serpapi.com/search.json"
-
-
-def _serpapi_get(params, timeout=30):
     try:
-        resp = requests.get(SERPAPI_URL, params=params, timeout=timeout)
-        return resp.json() if resp.status_code == 200 else {}
-    except (requests.RequestException, ValueError):
-        return {}
+        proc = subprocess.run(
+            [sys.executable, script],
+            input=json.dumps(items),
+            capture_output=True,
+            text=True,
+            timeout=30 * len(items) + 120
+        )
+        result = json.loads(proc.stdout.strip().splitlines()[-1])
+        error = ""
+    except Exception as e:
+        result = {}
+        error = (proc.stderr[-300:] if "proc" in locals() else str(e))
 
+    for l in leads:
+        l["Recent Post"] = result.get(l.get("Place ID"), "N/A")
 
-def _find_data_id(serpapi_key, place_id, name, address):
-    # 1) direct lookup by Google Place ID
-    data = _serpapi_get({
-        "engine": "google_maps",
-        "type": "place",
-        "place_id": place_id,
-        "api_key": serpapi_key
-    })
-    data_id = (data.get("place_results") or {}).get("data_id")
-    if data_id:
-        return data_id
-
-    # 2) fallback: search by name + address
-    data = _serpapi_get({
-        "engine": "google_maps",
-        "type": "search",
-        "q": f"{name} {address}".strip(),
-        "api_key": serpapi_key
-    })
-    results = data.get("local_results") or []
-
-    for r in results:
-        if r.get("place_id") == place_id and r.get("data_id"):
-            return r["data_id"]
-
-    if results and results[0].get("data_id"):
-        return results[0]["data_id"]
-
-    return ""
-
-
-def fetch_recent_post(serpapi_key, place_id, name="", address=""):
-    """"3 days ago" (age of the newest owner post) or a short status:
-    "No posts", "Not checked (no SerpApi key)", "N/A"."""
-    if not serpapi_key:
-        return "Not checked (no SerpApi key)"
-
-    try:
-        data_id = _find_data_id(serpapi_key, place_id, name, address)
-
-        if not data_id:
-            return "N/A"
-
-        data = _serpapi_get({
-            "engine": "google_maps_posts",
-            "data_id": data_id,
-            "api_key": serpapi_key
-        })
-
-        if data.get("error") and not data.get("posts"):
-            err = str(data.get("error")).lower()
-            # "hasn't returned any results" = business has no posts
-            if "hasn't returned any results" in err or "no results" in err:
-                return "No posts"
-            return "N/A"
-
-        posts = data.get("posts") or []
-
-        if not posts:
-            return "No posts"
-
-        return posts[0].get("posted_at") or "N/A"
-
-    except Exception:
-        return "N/A"
+    if error:
+        print("Recent Post error:", error)
 
 
 # ============================================================
@@ -1027,7 +980,7 @@ def search_google_maps(
     location,
     page_token=None,
     website_filter="no_website",
-    serpapi_key=""
+    check_recent_post=False
 ):
     """website_filter: "no_website" | "with_website" | "all"."""
 
@@ -1198,10 +1151,10 @@ def search_google_maps(
     # directories) - in parallel for speed
     if leads:
         with ThreadPoolExecutor(max_workers=10) as pool:
-            list(pool.map(
-                partial(_enrich_lead, serpapi_key=serpapi_key),
-                leads
-            ))
+            list(pool.map(_enrich_lead, leads))
+
+        if check_recent_post:
+            fetch_recent_posts(leads)
 
     next_page_token = result.get("nextPageToken")
 
