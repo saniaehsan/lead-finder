@@ -4,6 +4,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 import requests
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
@@ -657,7 +658,7 @@ def _review_text(review):
     return str(text or "").lower()
 
 
-def analyze_reviews(reviews, rating, review_count):
+def analyze_reviews(reviews, rating, review_count, has_website=False):
     """One-cell summary for the cold caller:
     QUALITY (rating) | negative reviews | Issues | Talking point."""
     reviews = reviews or []
@@ -674,6 +675,13 @@ def analyze_reviews(reviews, rating, review_count):
 
     # ---- no reviews / almost none ----
     if rating is None or review_count == 0:
+        if has_website:
+            return (
+                "NO REVIEWS YET | Talking point: This business has a "
+                "website but no Google reviews. Pitch: a stronger site "
+                "with testimonials and a review-request flow to build "
+                "trust with people searching for the service."
+            )
         return (
             "NO REVIEWS YET | Talking point: Nobody can judge this "
             "business online - no reviews and no website. Pitch a "
@@ -739,27 +747,45 @@ def analyze_reviews(reviews, rating, review_count):
     if top_issues:
         issues_txt = " and ".join(label for _, label, _ in top_issues[:2])
         fixes_txt = "; ".join(fix for _, _, fix in top_issues[:2])
-        point = (
-            f"Customers complain about {issues_txt}. Pitch: a website "
-            f"with {fixes_txt} fixes these problems and rebuilds trust."
-        )
+        if has_website:
+            point = (
+                f"Customers complain about {issues_txt}. Pitch: "
+                f"upgrading their website with {fixes_txt} fixes "
+                f"these problems and rebuilds trust."
+            )
+        else:
+            point = (
+                f"Customers complain about {issues_txt}. Pitch: a "
+                f"website with {fixes_txt} fixes these problems and "
+                f"rebuilds trust."
+            )
     elif quality in ("POOR", "MIXED"):
         point = (
-            "Reviews are not great. Pitch: a website with service "
-            "details, testimonials and easy contact gives new customers "
-            "a better first impression than the Google reviews alone."
+            "Reviews are not great. Pitch: "
+            + ("a better website" if has_website else "a website")
+            + " with service details, testimonials and easy contact "
+            "gives new customers a better first impression than the "
+            "Google reviews alone."
         )
     else:
         praise_txt = (
             f" (customers praise {' and '.join(top_praise)})"
             if top_praise else ""
         )
-        point = (
-            f"Happy customers{praise_txt}, but with no website, people "
-            "who Google them can't see proof of this work or book "
-            "online and go to competitors who have a site. Pitch: "
-            "turn these reviews into a website that wins those customers."
-        )
+        if has_website:
+            point = (
+                f"Happy customers{praise_txt}. Pitch: make sure the "
+                "website shows this proof (reviews, photos, easy "
+                "booking) so more visitors turn into customers."
+            )
+        else:
+            point = (
+                f"Happy customers{praise_txt}, but with no website, "
+                "people who Google them can't see proof of this work "
+                "or book online and go to competitors who have a site. "
+                "Pitch: turn these reviews into a website that wins "
+                "those customers."
+            )
 
     if review_count < 10:
         point += " (Few reviews - business is still small/new.)"
@@ -769,18 +795,117 @@ def analyze_reviews(reviews, rating, review_count):
     return " | ".join(parts)
 
 
-def _enrich_lead(lead):
-    """Review analysis fill karta hai; sab leads no-website hain,
-    isliye Email hamesha "NO WEBSITE" hota hai."""
+def _enrich_lead(lead, serpapi_key=""):
+    """Review analysis + Email + Recent Post fill karta hai."""
     reviews = lead.pop("_reviews", [])
     review_count = lead.pop("_review_count", 0)
+    has_site = _has_website(lead)
 
     lead["Review Quality / Service Issues"] = analyze_reviews(
         reviews,
         lead.get("Rating"),
-        review_count
+        review_count,
+        has_website=has_site
     )
-    lead["Email"] = "NO WEBSITE"
+
+    if has_site:
+        info = scrape_contact_info(lead.get("Website"))
+        lead["Email"] = info["email"] or "NOT FOUND"
+    else:
+        lead["Email"] = "NO WEBSITE"
+
+    lead["Recent Post"] = fetch_recent_post(
+        serpapi_key,
+        lead.get("Place ID"),
+        lead.get("Business Name", ""),
+        lead.get("Address", "")
+    )
+
+
+# ============================================================
+# RECENT POST (Google Maps "From the owner" posts)
+# ============================================================
+# Google Places API (official) owner posts return NAHI karta, isliye
+# yeh SerpApi ke "Google Maps Posts" API se aata hai (alag API key,
+# paid after free quota). Har lead ke liye 1-2 SerpApi searches lagti
+# hain: (1) place ka data_id, (2) us data_id ki posts.
+
+SERPAPI_URL = "https://serpapi.com/search.json"
+
+
+def _serpapi_get(params, timeout=30):
+    try:
+        resp = requests.get(SERPAPI_URL, params=params, timeout=timeout)
+        return resp.json() if resp.status_code == 200 else {}
+    except (requests.RequestException, ValueError):
+        return {}
+
+
+def _find_data_id(serpapi_key, place_id, name, address):
+    # 1) direct lookup by Google Place ID
+    data = _serpapi_get({
+        "engine": "google_maps",
+        "type": "place",
+        "place_id": place_id,
+        "api_key": serpapi_key
+    })
+    data_id = (data.get("place_results") or {}).get("data_id")
+    if data_id:
+        return data_id
+
+    # 2) fallback: search by name + address
+    data = _serpapi_get({
+        "engine": "google_maps",
+        "type": "search",
+        "q": f"{name} {address}".strip(),
+        "api_key": serpapi_key
+    })
+    results = data.get("local_results") or []
+
+    for r in results:
+        if r.get("place_id") == place_id and r.get("data_id"):
+            return r["data_id"]
+
+    if results and results[0].get("data_id"):
+        return results[0]["data_id"]
+
+    return ""
+
+
+def fetch_recent_post(serpapi_key, place_id, name="", address=""):
+    """"3 days ago" (age of the newest owner post) or a short status:
+    "No posts", "Not checked (no SerpApi key)", "N/A"."""
+    if not serpapi_key:
+        return "Not checked (no SerpApi key)"
+
+    try:
+        data_id = _find_data_id(serpapi_key, place_id, name, address)
+
+        if not data_id:
+            return "N/A"
+
+        data = _serpapi_get({
+            "engine": "google_maps_posts",
+            "data_id": data_id,
+            "api_key": serpapi_key
+        })
+
+        if data.get("error") and not data.get("posts"):
+            err = str(data.get("error")).lower()
+            # "hasn't returned any results" = business has no posts
+            if "hasn't returned any results" in err or "no results" in err:
+                return "No posts"
+            return "N/A"
+
+        posts = data.get("posts") or []
+
+        if not posts:
+            return "No posts"
+
+        return posts[0].get("posted_at") or "N/A"
+
+    except Exception:
+        return "N/A"
 
 
 # ============================================================
@@ -900,8 +1025,11 @@ def search_google_maps(
     api_key,
     business_type,
     location,
-    page_token=None
+    page_token=None,
+    website_filter="no_website",
+    serpapi_key=""
 ):
+    """website_filter: "no_website" | "with_website" | "all"."""
 
     URL = "https://places.googleapis.com/v1/places:searchText"
 
@@ -1018,16 +1146,26 @@ def search_google_maps(
         # Sirf "NO WEBSITE" wale leads rakhne hain. Website wale
         # businesses leads me nahi aate, lekin competitor pool me
         # jate hain (competitor columns ke liye) - bina enrichment ke.
-        if website:
-            loc_c = place.get("location", {}) or {}
-            competitors.append({
-                "Business Name": name,
-                "Website": website,
-                "Rating": rating,
-                "Place ID": place_id,
-                "Latitude": loc_c.get("latitude"),
-                "Longitude": loc_c.get("longitude")
-            })
+        has_site = bool(website)
+
+        keep = (
+            website_filter == "all"
+            or (website_filter == "with_website" and has_site)
+            or (website_filter == "no_website" and not has_site)
+        )
+
+        if not keep:
+            # Website wale (jo lead nahi bane) competitor pool me jate hain.
+            if has_site:
+                loc_c = place.get("location", {}) or {}
+                competitors.append({
+                    "Business Name": name,
+                    "Website": website,
+                    "Rating": rating,
+                    "Place ID": place_id,
+                    "Latitude": loc_c.get("latitude"),
+                    "Longitude": loc_c.get("longitude")
+                })
             continue
 
         google_maps_link = build_maps_link(
@@ -1046,6 +1184,7 @@ def search_google_maps(
             "Website": website if website else "NO WEBSITE",
             "Rating": rating,
             "Reviews": reviews_text,
+            "Recent Post": "",
             "Review Quality / Service Issues": "",
             "Place ID": place_id,
             "Google Maps": google_maps_link,
@@ -1059,7 +1198,10 @@ def search_google_maps(
     # directories) - in parallel for speed
     if leads:
         with ThreadPoolExecutor(max_workers=10) as pool:
-            list(pool.map(_enrich_lead, leads))
+            list(pool.map(
+                partial(_enrich_lead, serpapi_key=serpapi_key),
+                leads
+            ))
 
     next_page_token = result.get("nextPageToken")
 

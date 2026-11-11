@@ -86,6 +86,16 @@ with st.sidebar:
         type="password"
     )
 
+    st.header("Recent Post (optional)")
+
+    serpapi_key = st.text_input(
+        "SerpApi Key",
+        type="password",
+        help="Google Places API owner posts nahi deta. 'Recent Post' "
+             "column ke liye SerpApi (serpapi.com) ki key chahiye. "
+             "Khali chhorein to column 'Not checked' dikhayega."
+    )
+
 
 # ============================================================
 # COUNTRY
@@ -228,6 +238,25 @@ business_type = st.selectbox(
 
 
 # ============================================================
+# WEBSITE FILTER (decides which businesses become leads)
+# ============================================================
+
+WEBSITE_FILTER_OPTIONS = {
+    "No Website": "no_website",
+    "With Website": "with_website",
+    "All (With + No Website)": "all"
+}
+
+website_filter_label = st.selectbox(
+    "Website",
+    list(WEBSITE_FILTER_OPTIONS.keys()),
+    index=0
+)
+
+website_filter = WEBSITE_FILTER_OPTIONS[website_filter_label]
+
+
+# ============================================================
 # RESULT FILTERS (applied to the saved results table below)
 # ============================================================
 
@@ -266,7 +295,8 @@ search_key = (
     f"{city}|"
     f"{county}|"
     f"{state}|"
-    f"{country}"
+    f"{country}|"
+    f"{website_filter}"
 )
 
 
@@ -351,14 +381,16 @@ if st.button(
             )
 
             with st.spinner(
-                f"Searching Page {page_number} and no-website businesses only..."
+                f"Searching Page {page_number} ({website_filter_label})..."
             ):
 
                 result = scraper.search_google_maps(
                     api_key=api_key,
                     business_type=business_type,
                     location=location,
-                    page_token=page_token
+                    page_token=page_token,
+                    website_filter=website_filter,
+                    serpapi_key=serpapi_key
                 )
 
             if not result.get("success", False):
@@ -644,6 +676,10 @@ if not st.session_state["leads"].empty:
             ),
             "Reviews": st.column_config.TextColumn(
                 "Reviews"
+            ),
+            "Recent Post": st.column_config.TextColumn(
+                "Recent Post",
+                help="Age of the newest Google Maps 'From the owner' post"
             ),
             "Review Quality / Service Issues":
                 st.column_config.TextColumn(
