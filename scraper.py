@@ -1,11 +1,20 @@
 import html
 import math
+import os
 import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 import requests
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
+
+# ============================================================
+# SERPAPI KEY (sirf "Recent Post" column ke liye)
+# ============================================================
+# Apni SerpApi key yahan quotes ke andar paste karein.
+# Key khali ho to "Recent Post" browser (Playwright) se nikalta hai.
+# (Ya key ko environment variable SERPAPI_KEY me rakh sakte hain.)
+SERPAPI_KEY = "36f86ee8ab305d604598631cea662fd4078bd9fb92e0570531f36d27b9af2f52"
 
 
 def build_maps_link(place_id, name="", address=""):
@@ -821,10 +830,86 @@ def _enrich_lead(lead):
 # ============================================================
 # recent_post.py Playwright se Maps page kholta hai (alag process me).
 
-def fetch_recent_posts(leads):
-    """leads ki list me "Recent Post" fill karta hai (in place)."""
+SERPAPI_URL = "https://serpapi.com/search.json"
+
+
+def _get_serpapi_key():
+    return (SERPAPI_KEY or os.environ.get("SERPAPI_KEY", "")).strip()
+
+
+def _serpapi_get(params, timeout=30):
+    try:
+        resp = requests.get(SERPAPI_URL, params=params, timeout=timeout)
+        return resp.json() if resp.status_code == 200 else {}
+    except (requests.RequestException, ValueError):
+        return {}
+
+
+def _find_data_id(key, place_id, name, address):
+    # 1) direct lookup by Google Place ID
+    data = _serpapi_get({
+        "engine": "google_maps",
+        "type": "place",
+        "place_id": place_id,
+        "api_key": key
+    })
+    data_id = (data.get("place_results") or {}).get("data_id")
+    if data_id:
+        return data_id
+
+    # 2) fallback: search by name + address
+    data = _serpapi_get({
+        "engine": "google_maps",
+        "type": "search",
+        "q": f"{name} {address}".strip(),
+        "api_key": key
+    })
+    results = data.get("local_results") or []
+
+    for r in results:
+        if r.get("place_id") == place_id and r.get("data_id"):
+            return r["data_id"]
+
+    if results and results[0].get("data_id"):
+        return results[0]["data_id"]
+
+    return ""
+
+
+def _recent_post_serpapi(key, lead):
+    """"3 days ago" / "No posts" / "N/A" (SerpApi Google Maps Posts)."""
+    try:
+        data_id = _find_data_id(
+            key,
+            lead.get("Place ID"),
+            lead.get("Business Name", ""),
+            lead.get("Address", "")
+        )
+        if not data_id:
+            return "N/A"
+
+        data = _serpapi_get({
+            "engine": "google_maps_posts",
+            "data_id": data_id,
+            "api_key": key
+        })
+        posts = data.get("posts") or []
+
+        if posts:
+            return posts[0].get("posted_at") or "N/A"
+
+        err = str(data.get("error", "")).lower()
+        if "hasn't returned any results" in err or not err:
+            return "No posts"
+
+        return "N/A"
+    except Exception:
+        return "N/A"
+
+
+def _fetch_recent_posts_browser(leads):
+    """Key na ho to: Playwright se Maps page parh kar (alag process)."""
     import json
-    import os
     import subprocess
     import sys
 
@@ -859,6 +944,26 @@ def fetch_recent_posts(leads):
 
     if error:
         print("Recent Post error:", error)
+
+
+def fetch_recent_posts(leads):
+    """leads me "Recent Post" fill karta hai (in place).
+
+    SERPAPI_KEY set ho to SerpApi (tez, 2 searches per lead);
+    warna browser method (slow, bina key)."""
+    key = _get_serpapi_key()
+
+    if not key:
+        _fetch_recent_posts_browser(leads)
+        return
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        results = list(pool.map(
+            lambda l: _recent_post_serpapi(key, l), leads
+        ))
+
+    for l, r in zip(leads, results):
+        l["Recent Post"] = r
 
 
 # ============================================================
@@ -980,7 +1085,7 @@ def search_google_maps(
     location,
     page_token=None,
     website_filter="no_website",
-    check_recent_post=False
+    check_recent_post=True
 ):
     """website_filter: "no_website" | "with_website" | "all"."""
 
@@ -1106,6 +1211,11 @@ def search_google_maps(
             or (website_filter == "with_website" and has_site)
             or (website_filter == "no_website" and not has_site)
         )
+
+        # Sirf phone number wali leads rakhni hain (bina phone wali
+        # lead nahi banti; website wale competitor pool me chale jate hain).
+        if not (phone or "").strip():
+            keep = False
 
         if not keep:
             # Website wale (jo lead nahi bane) competitor pool me jate hain.

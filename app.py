@@ -245,22 +245,6 @@ website_filter_label = st.selectbox(
 
 website_filter = WEBSITE_FILTER_OPTIONS[website_filter_label]
 
-check_recent_post = st.checkbox(
-    "Check Recent Post (slow: ~5-10 sec per lead)",
-    value=False,
-    help="Har lead ka Google Maps page browser me khol kar 'From the "
-         "owner' post ki age nikalta hai. Bina API key ke, lekin slow."
-)
-
-
-# ============================================================
-# RESULT FILTERS (applied to the saved results table below)
-# ============================================================
-
-phone_filter = st.checkbox(
-    "Only businesses with phone numbers",
-    value=True
-)
 
 
 # ============================================================
@@ -387,7 +371,7 @@ if st.button(
                     location=location,
                     page_token=page_token,
                     website_filter=website_filter,
-                    check_recent_post=check_recent_post
+                    check_recent_post=True
                 )
 
             if not result.get("success", False):
@@ -609,16 +593,6 @@ if not st.session_state["leads"].empty:
     )
 
     filtered_df = df.copy()
-
-    if phone_filter:
-
-        filtered_df = filtered_df[
-            filtered_df["Phone Number"]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            != ""
-        ]
 
     st.info(
         f"{len(filtered_df)} leads "
