@@ -415,6 +415,10 @@ if st.button(
                         "Business Type"
                     ] = business_type
 
+                    leads_before = len(
+                        st.session_state["leads"]
+                    )
+
                     if (
                         st.session_state[
                             "leads"
@@ -457,12 +461,24 @@ if st.button(
                         "leads"
                     ] = combined_df
 
-                    st.success(
+                    # Asli new leads = dedupe ke BAAD jitni barhin
+                    # (purani leads dobara aayen to wo new nahi hain).
+                    new_count = len(combined_df) - leads_before
+                    duplicates = len(leads) - new_count
+
+                    msg = (
                         f"Page {page_number}: "
-                        f"{len(leads)} new lead(s) found. "
+                        f"{new_count} new lead(s) found. "
                         f"Total saved leads: "
                         f"{len(combined_df)}"
                     )
+
+                    if duplicates > 0:
+                        msg += (
+                            f" ({duplicates} already saved, skipped)"
+                        )
+
+                    st.success(msg)
 
                 else:
 
