@@ -1084,7 +1084,7 @@ def search_google_maps(
     business_type,
     location,
     page_token=None,
-    website_filter="with_website",
+    website_filter="all",
     check_recent_post=True
 ):
     """website_filter: "no_website" | "with_website" | "all"."""

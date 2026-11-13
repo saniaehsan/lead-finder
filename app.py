@@ -341,7 +341,7 @@ if st.button(
             )
 
             with st.spinner(
-                f"Searching Page {page_number} (with website + phone)..."
+                f"Searching Page {page_number} (with phone number)..."
             ):
 
                 result = scraper.search_google_maps(
