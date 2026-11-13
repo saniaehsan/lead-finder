@@ -228,26 +228,6 @@ business_type = st.selectbox(
 
 
 # ============================================================
-# WEBSITE FILTER (decides which businesses become leads)
-# ============================================================
-
-WEBSITE_FILTER_OPTIONS = {
-    "No Website": "no_website",
-    "With Website": "with_website",
-    "All (With + No Website)": "all"
-}
-
-website_filter_label = st.selectbox(
-    "Website",
-    list(WEBSITE_FILTER_OPTIONS.keys()),
-    index=0
-)
-
-website_filter = WEBSITE_FILTER_OPTIONS[website_filter_label]
-
-
-
-# ============================================================
 # BUILD SEARCH LOCATION
 # ============================================================
 
@@ -276,8 +256,7 @@ search_key = (
     f"{city}|"
     f"{county}|"
     f"{state}|"
-    f"{country}|"
-    f"{website_filter}"
+    f"{country}"
 )
 
 
@@ -362,7 +341,7 @@ if st.button(
             )
 
             with st.spinner(
-                f"Searching Page {page_number} ({website_filter_label})..."
+                f"Searching Page {page_number} (with website + phone)..."
             ):
 
                 result = scraper.search_google_maps(
@@ -370,7 +349,6 @@ if st.button(
                     business_type=business_type,
                     location=location,
                     page_token=page_token,
-                    website_filter=website_filter,
                     check_recent_post=True
                 )
 
