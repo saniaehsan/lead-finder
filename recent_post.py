@@ -8,7 +8,7 @@ asyncio ke masle deta hai, isliye scraper.py is file ko ALAG PROCESS me
 chalata hai:   python recent_post.py   (JSON stdin -> JSON stdout)
 
 Input : [{"id": "...", "link": "https://www.google.com/maps/..."}, ...]
-Output: {"<id>": "3 days ago" | "No posts" | "N/A", ...}
+Output: {"<id>": "3 days ago" | "No posts" | "Error: ...", ...}
 """
 import json
 import random
@@ -24,7 +24,7 @@ OWNER_MARKERS = ("from the owner", "updates from the owner")
 
 
 def extract_recent_post(page_text):
-    """Page text -> '3 days ago' / 'No posts' / 'N/A'.
+    """Page text -> '3 days ago' / 'No posts' / 'Error: ...'.
 
     Sirf "From the owner" section ke baad wala pehla '... ago' liya
     jata hai (reviews me bhi '... ago' hota hai, unhe ignore karna hai).
@@ -51,7 +51,7 @@ def extract_recent_post(page_text):
             chunk = chunk[:i]
 
     m = AGO_RE.search(chunk)
-    return m.group(0) if m else "N/A"
+    return m.group(0) if m else "Error: post found but date not readable"
 
 
 def _dismiss_consent(page):
@@ -75,7 +75,7 @@ def check_one(page, link):
     try:
         page.wait_for_selector("h1", timeout=15000)
     except Exception:
-        return "N/A"            # page load nahi hua / captcha
+        return "Error: Maps page did not load (blocked or slow internet)"
 
     page.wait_for_timeout(2000)
 
@@ -88,7 +88,7 @@ def check_one(page, link):
     text = page.inner_text("body")
 
     if "unusual traffic" in text.lower():
-        return "N/A"
+        return "Error: Google captcha (unusual traffic), try later"
 
     return extract_recent_post(text)
 
@@ -115,8 +115,9 @@ def main():
         for it in items:
             try:
                 out[it["id"]] = check_one(page, it["link"])
-            except Exception:
-                out[it["id"]] = "N/A"
+            except Exception as e:
+                first = (str(e).strip().splitlines() or [type(e).__name__])[0]
+                out[it["id"]] = "Error: " + first[:100]
             page.wait_for_timeout(int(random.uniform(1000, 2500)))
 
         browser.close()

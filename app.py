@@ -597,9 +597,12 @@ if not st.session_state["leads"].empty:
         .astype(str)
     )
 
-    # "Not checked" / khali / "N/A" (retry) wali leads check hongi
-    pending_mask = rp_series.isin(["", "Not checked", "N/A"]) | \
-        rp_series.str.startswith("Not checked")
+    # "Not checked" / khali / "Error..." (retry) wali leads check hongi
+    pending_mask = (
+        rp_series.isin(["", "N/A"])
+        | rp_series.str.startswith("Not checked")
+        | rp_series.str.startswith("Error")
+    )
 
     pending_count = int(pending_mask.sum())
 
@@ -643,7 +646,35 @@ if not st.session_state["leads"].empty:
         ]
         st.session_state["leads"] = leads_df
 
+        # Errors ko dikhane ke liye save karo (rerun ke baad show hoga)
+        errs = sorted({
+            v for v in results.values() if str(v).startswith("Error")
+        })
+        st.session_state["rp_summary"] = {
+            "checked": len(results),
+            "errors": errs,
+            "error_count": sum(
+                1 for v in results.values()
+                if str(v).startswith("Error")
+            ),
+        }
+
         st.rerun()
+
+    summary = st.session_state.get("rp_summary")
+
+    if summary:
+        if summary["error_count"]:
+            st.error(
+                f"Recent Post: {summary['error_count']} of "
+                f"{summary['checked']} leads failed. Reason(s):\n\n"
+                + "\n".join(f"- {e}" for e in summary["errors"][:5])
+                + "\n\nFailed leads will be retried on the next click."
+            )
+        else:
+            st.success(
+                f"Recent Post checked for {summary['checked']} leads."
+            )
 
     # Show every row on this same page (no internal scroll
     # cutting results short). Height grows with the number of

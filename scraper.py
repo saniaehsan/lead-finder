@@ -838,14 +838,36 @@ def _get_serpapi_key():
 
 
 def _serpapi_get(params, timeout=30):
+    """SerpApi response dict. Fail hone par {"error": "..."} milta hai
+    (error chhupaya nahi jata)."""
     try:
         resp = requests.get(SERPAPI_URL, params=params, timeout=timeout)
-        return resp.json() if resp.status_code == 200 else {}
-    except (requests.RequestException, ValueError):
-        return {}
+    except requests.RequestException as e:
+        return {"error": f"Request failed ({type(e).__name__})"}
+
+    try:
+        body = resp.json()
+    except ValueError:
+        return {"error": f"HTTP {resp.status_code}: invalid response"}
+
+    if not isinstance(body, dict):
+        return {"error": f"HTTP {resp.status_code}: unexpected response"}
+
+    if resp.status_code != 200 and not body.get("error"):
+        body["error"] = f"HTTP {resp.status_code}"
+
+    return body
+
+
+def _is_no_results(err):
+    err = str(err or "").lower()
+    return "hasn't returned any results" in err or "no results" in err
 
 
 def _find_data_id(key, place_id, name, address):
+    """(data_id, error) return karta hai."""
+    last_error = ""
+
     # 1) direct lookup by Google Place ID
     data = _serpapi_get({
         "engine": "google_maps",
@@ -855,7 +877,10 @@ def _find_data_id(key, place_id, name, address):
     })
     data_id = (data.get("place_results") or {}).get("data_id")
     if data_id:
-        return data_id
+        return data_id, ""
+
+    if data.get("error") and not _is_no_results(data["error"]):
+        last_error = data["error"]
 
     # 2) fallback: search by name + address
     data = _serpapi_get({
@@ -868,25 +893,35 @@ def _find_data_id(key, place_id, name, address):
 
     for r in results:
         if r.get("place_id") == place_id and r.get("data_id"):
-            return r["data_id"]
+            return r["data_id"], ""
 
     if results and results[0].get("data_id"):
-        return results[0]["data_id"]
+        return results[0]["data_id"], ""
 
-    return ""
+    if data.get("error") and not _is_no_results(data["error"]):
+        last_error = data["error"]
+
+    return "", last_error
+
+
+def _short(msg, n=120):
+    msg = " ".join(str(msg).split())
+    return msg if len(msg) <= n else msg[:n - 1] + "..."
 
 
 def _recent_post_serpapi(key, lead):
-    """"3 days ago" / "No posts" / "N/A" (SerpApi Google Maps Posts)."""
+    """"3 days ago" / "No posts" / "Error: <reason>"."""
     try:
-        data_id = _find_data_id(
+        data_id, err = _find_data_id(
             key,
             lead.get("Place ID"),
             lead.get("Business Name", ""),
             lead.get("Address", "")
         )
         if not data_id:
-            return "N/A"
+            return "Error: " + _short(
+                err or "place not found on SerpApi"
+            )
 
         data = _serpapi_get({
             "engine": "google_maps_posts",
@@ -896,15 +931,19 @@ def _recent_post_serpapi(key, lead):
         posts = data.get("posts") or []
 
         if posts:
-            return posts[0].get("posted_at") or "N/A"
+            return posts[0].get("posted_at") or \
+                "Error: post found but has no date"
 
-        err = str(data.get("error", "")).lower()
-        if "hasn't returned any results" in err or not err:
-            return "No posts"
+        err = data.get("error")
 
-        return "N/A"
-    except Exception:
-        return "N/A"
+        if err:
+            if _is_no_results(err):
+                return "No posts"
+            return "Error: " + _short(err)
+
+        return "No posts"
+    except Exception as e:
+        return "Error: " + _short(f"{type(e).__name__}: {e}")
 
 
 def _fetch_recent_posts_browser(leads):
@@ -925,6 +964,9 @@ def _fetch_recent_posts_browser(leads):
         os.path.dirname(os.path.abspath(__file__)), "recent_post.py"
     )
 
+    result = {}
+    error = ""
+
     try:
         proc = subprocess.run(
             [sys.executable, script],
@@ -933,17 +975,29 @@ def _fetch_recent_posts_browser(leads):
             text=True,
             timeout=30 * len(items) + 120
         )
-        result = json.loads(proc.stdout.strip().splitlines()[-1])
-        error = ""
+        try:
+            result = json.loads(proc.stdout.strip().splitlines()[-1])
+        except Exception:
+            err_text = proc.stderr or ""
+            if "No module named 'playwright'" in err_text:
+                error = ("Playwright not installed "
+                         "(pip install playwright)")
+            elif "Executable doesn't exist" in err_text:
+                error = ("Browser missing "
+                         "(run: playwright install chromium)")
+            else:
+                last = err_text.strip().splitlines()[-1:] or ["no output"]
+                error = "Browser check failed: " + last[0]
+    except subprocess.TimeoutExpired:
+        error = "Browser check timed out"
     except Exception as e:
-        result = {}
-        error = (proc.stderr[-300:] if "proc" in locals() else str(e))
+        error = f"{type(e).__name__}: {e}"
 
     for l in leads:
-        l["Recent Post"] = result.get(l.get("Place ID"), "N/A")
-
-    if error:
-        print("Recent Post error:", error)
+        l["Recent Post"] = result.get(
+            l.get("Place ID"),
+            "Error: " + _short(error or "no result returned")
+        )
 
 
 def fetch_recent_posts(leads):
