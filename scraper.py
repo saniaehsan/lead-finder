@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 # Apni SerpApi key yahan quotes ke andar paste karein.
 # Key khali ho to "Recent Post" browser (Playwright) se nikalta hai.
 # (Ya key ko environment variable SERPAPI_KEY me rakh sakte hain.)
-SERPAPI_KEY = "36f86ee8ab305d604598631cea662fd4078bd9fb92e0570531f36d27b9af2f52"
+SERPAPI_KEY = "e09466e8feb304a49cd2a5040412472f497d224aa49bfebab5605b02b911f24a"
 
 
 def build_maps_link(place_id, name="", address=""):
@@ -1085,7 +1085,7 @@ def search_google_maps(
     location,
     page_token=None,
     website_filter="all",
-    check_recent_post=True
+    check_recent_post=False
 ):
     """website_filter: "no_website" | "with_website" | "all"."""
 

@@ -349,7 +349,7 @@ if st.button(
                     business_type=business_type,
                     location=location,
                     page_token=page_token,
-                    check_recent_post=True
+                    check_recent_post=False
                 )
 
             if not result.get("success", False):
@@ -584,6 +584,66 @@ if not st.session_state["leads"].empty:
         f"{len(filtered_df)} leads "
         f"currently shown."
     )
+
+    # ------------------------------------------------------------
+    # RECENT POST BUTTON (search ke saath nahi, button click par)
+    # ------------------------------------------------------------
+    if "Recent Post" not in st.session_state["leads"].columns:
+        st.session_state["leads"]["Recent Post"] = "Not checked"
+
+    rp_series = (
+        st.session_state["leads"]["Recent Post"]
+        .fillna("")
+        .astype(str)
+    )
+
+    # "Not checked" / khali / "N/A" (retry) wali leads check hongi
+    pending_mask = rp_series.isin(["", "Not checked", "N/A"]) | \
+        rp_series.str.startswith("Not checked")
+
+    pending_count = int(pending_mask.sum())
+
+    if st.button(
+        f"CHECK RECENT POSTS ({pending_count} leads)",
+        use_container_width=True,
+        disabled=(pending_count == 0)
+    ):
+
+        pending_df = st.session_state["leads"][pending_mask]
+
+        to_check = [
+            {
+                "Place ID": r["Place ID"],
+                "Business Name": r.get("Business Name", ""),
+                "Address": r.get("Address", ""),
+                "Google Maps": scraper.build_maps_link(
+                    r["Place ID"],
+                    r.get("Business Name", ""),
+                    r.get("Address", "")
+                ),
+            }
+            for _, r in pending_df.iterrows()
+        ]
+
+        with st.spinner(
+            f"Checking recent posts for {len(to_check)} leads..."
+        ):
+            scraper.fetch_recent_posts(to_check)
+
+        results = {
+            l["Place ID"]: l["Recent Post"] for l in to_check
+        }
+
+        leads_df = st.session_state["leads"]
+        leads_df["Recent Post"] = [
+            results.get(pid, old)
+            for pid, old in zip(
+                leads_df["Place ID"], leads_df["Recent Post"]
+            )
+        ]
+        st.session_state["leads"] = leads_df
+
+        st.rerun()
 
     # Show every row on this same page (no internal scroll
     # cutting results short). Height grows with the number of
