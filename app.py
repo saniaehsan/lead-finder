@@ -628,29 +628,55 @@ if not st.session_state["leads"].empty:
             for _, r in pending_df.iterrows()
         ]
 
-        with st.spinner(
-            f"Checking recent posts for {len(to_check)} leads..."
-        ):
-            scraper.fetch_recent_posts(to_check)
+        results = {}
+        BATCH = 10
+        progress = st.progress(0.0, text="Checking recent posts...")
 
-        results = {
-            l["Place ID"]: l["Recent Post"] for l in to_check
-        }
+        for i in range(0, len(to_check), BATCH):
 
-        leads_df = st.session_state["leads"]
-        leads_df["Recent Post"] = [
-            results.get(pid, old)
-            for pid, old in zip(
-                leads_df["Place ID"], leads_df["Recent Post"]
+            batch = to_check[i:i + BATCH]
+            scraper.fetch_recent_posts(batch)
+
+            for l in batch:
+                results[l["Place ID"]] = l["Recent Post"]
+
+            # Har batch ke baad foran save: beech me ruk jaye / error aaye
+            # to bhi jo leads ho chuki hain wo wapas check nahi hongi.
+            leads_df = st.session_state["leads"]
+            leads_df["Recent Post"] = [
+                results.get(pid, old)
+                for pid, old in zip(
+                    leads_df["Place ID"], leads_df["Recent Post"]
+                )
+            ]
+            st.session_state["leads"] = leads_df
+
+            done = min(i + BATCH, len(to_check))
+            progress.progress(
+                done / len(to_check),
+                text=f"Checked {done} of {len(to_check)} leads"
             )
-        ]
-        st.session_state["leads"] = leads_df
+
+            # Poori batch ek hi error se fail (jaise sab keys khatam /
+            # Playwright missing) -> baaki leads par waqt zaya na karo.
+            batch_vals = {l["Recent Post"] for l in batch}
+            if (
+                len(batch_vals) == 1
+                and next(iter(batch_vals)).startswith("Error")
+            ):
+                break
+
+        progress.empty()
 
         # Errors ko dikhane ke liye save karo (rerun ke baad show hoga)
         errs = sorted({
             v for v in results.values() if str(v).startswith("Error")
         })
         st.session_state["rp_summary"] = {
+            "keys_loaded": (
+                len(scraper._get_serpapi_keys())
+                if hasattr(scraper, "_get_serpapi_keys") else None
+            ),
             "checked": len(results),
             "errors": errs,
             "error_count": sum(
@@ -665,11 +691,19 @@ if not st.session_state["leads"].empty:
 
     if summary:
         if summary["error_count"]:
+            kl = summary.get("keys_loaded")
+            key_note = (
+                "\n\n**Old scraper.py is still running - fully stop "
+                "and restart the app (Ctrl+C, then streamlit run app.py).**"
+                if kl is None
+                else f"\n\nSerpApi keys loaded: {kl}"
+            )
             st.error(
                 f"Recent Post: {summary['error_count']} of "
                 f"{summary['checked']} leads failed. Reason(s):\n\n"
                 + "\n".join(f"- {e}" for e in summary["errors"][:5])
                 + "\n\nFailed leads will be retried on the next click."
+                + key_note
             )
         else:
             st.success(

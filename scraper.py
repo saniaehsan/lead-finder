@@ -898,10 +898,14 @@ def _serpapi_get(params, timeout=30):
 
         return body
 
-    if last_error:
-        return {"error": f"All SerpApi keys failed. Last: {last_error}"}
+    if not last_error and _key_state["dead"]:
+        k, why = list(_key_state["dead"].items())[-1]
+        last_error = f"key ...{k[-4:]}: {why}"
 
-    return {"error": "All SerpApi keys failed (exhausted/invalid)"}
+    return {
+        "error": f"All {len(keys)} SerpApi key(s) failed. "
+                 f"Last: {last_error}"
+    }
 
 
 def _serpapi_request(params, timeout=30):
