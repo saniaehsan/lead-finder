@@ -591,6 +591,14 @@ if not st.session_state["leads"].empty:
     if "Recent Post" not in st.session_state["leads"].columns:
         st.session_state["leads"]["Recent Post"] = "Not checked"
 
+    # Pehle se saved ISO dates ("2026-11-12T21:49:39Z") ko "4 days ago" me badlo
+    st.session_state["leads"]["Recent Post"] = (
+        st.session_state["leads"]["Recent Post"]
+        .fillna("")
+        .astype(str)
+        .map(scraper.relative_age)
+    )
+
     rp_series = (
         st.session_state["leads"]["Recent Post"]
         .fillna("")

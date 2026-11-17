@@ -971,6 +971,54 @@ def _find_data_id(place_id, name, address):
     return "", last_error
 
 
+import datetime as _dt
+
+_ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+
+
+def relative_age(value):
+    """"2026-11-12T21:49:39Z" -> "4 days ago". Pehle se "3 days ago"
+    jaisa text ho (ya ISO na ho) to waisa hi wapas."""
+    text = str(value or "").strip()
+
+    if not _ISO_RE.match(text):
+        return text
+
+    try:
+        then = _dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if then.tzinfo is None:
+            then = then.replace(tzinfo=_dt.timezone.utc)
+        secs = (
+            _dt.datetime.now(_dt.timezone.utc) - then
+        ).total_seconds()
+    except ValueError:
+        return text
+
+    if secs < 0:
+        secs = 0
+
+    mins = int(secs // 60)
+    hours = int(secs // 3600)
+    days = int(secs // 86400)
+
+    if mins < 1:
+        return "just now"
+    if mins < 60:
+        return f"{mins} minute{'s' if mins != 1 else ''} ago"
+    if hours < 24:
+        return "an hour ago" if hours == 1 else f"{hours} hours ago"
+    if days < 7:
+        return f"{days} day{'s' if days != 1 else ''} ago"
+    if days < 30:
+        w = days // 7
+        return "a week ago" if w == 1 else f"{w} weeks ago"
+    if days < 365:
+        m = days // 30
+        return "a month ago" if m == 1 else f"{m} months ago"
+    y = days // 365
+    return "a year ago" if y == 1 else f"{y} years ago"
+
+
 def _short(msg, n=120):
     msg = " ".join(str(msg).split())
     return msg if len(msg) <= n else msg[:n - 1] + "..."
@@ -989,14 +1037,25 @@ def _recent_post_serpapi(lead):
                 err or "place not found on SerpApi"
             )
 
-        data = _serpapi_get({
-            "engine": "google_maps_posts",
-            "data_id": data_id
-        })
+        # "Failed to retrieve..." aksar temporary hota hai: 2 retries
+        for attempt in range(3):
+            data = _serpapi_get({
+                "engine": "google_maps_posts",
+                "data_id": data_id
+            })
+            if data.get("posts"):
+                break
+            if "failed to retrieve" not in str(
+                data.get("error", "")
+            ).lower():
+                break
+            time.sleep(1.5 * (attempt + 1))
+
         posts = data.get("posts") or []
 
         if posts:
-            return posts[0].get("posted_at") or \
+            posted = posts[0].get("posted_at")
+            return relative_age(posted) if posted else \
                 "Error: post found but has no date"
 
         err = data.get("error")
