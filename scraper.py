@@ -9,12 +9,20 @@ import requests
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 # ============================================================
-# SERPAPI KEY (sirf "Recent Post" column ke liye)
+# SERPAPI KEYS (sirf "Recent Post" column ke liye)
 # ============================================================
-# Apni SerpApi key yahan quotes ke andar paste karein.
-# Key khali ho to "Recent Post" browser (Playwright) se nikalta hai.
-# (Ya key ko environment variable SERPAPI_KEY me rakh sakte hain.)
-SERPAPI_KEY = "080311d3dcb70c7d5cdec77a6bb1910c0686d410865d078dd35cfeb9d4804fe1"
+# Ek ya zyada SerpApi keys quotes ke andar, comma laga kar paste karein.
+# Searches keys me barabar baant di jati hain; kisi key ka quota khatam
+# (ya key galat) ho to code khud agli key par chala jata hai.
+# Sab khali hon to "Recent Post" browser (Playwright) se nikalta hai.
+# (Ya environment variable SERPAPI_KEYS me comma-separated rakhein.)
+SERPAPI_KEYS = [
+    "e722a3f6b2713114284e09ba15799a7f9cfeb78e2d859acabcea4a9383495b80",   # key 1
+    "f3e53701dd05a64975f8ce8214b3ef4a514544a2d0276fd44269b4fcc595b800",   # key 2
+    "c7212d59cf32e242278758f42e04f974027310626eaa6baba0359a31ccd5b3ae",   # key 3
+    "",   # key 4
+    "",   # key 5
+]
 
 
 def build_maps_link(place_id, name="", address=""):
@@ -833,13 +841,70 @@ def _enrich_lead(lead):
 SERPAPI_URL = "https://serpapi.com/search.json"
 
 
-def _get_serpapi_key():
-    return (SERPAPI_KEY or os.environ.get("SERPAPI_KEY", "")).strip()
+def _get_serpapi_keys():
+    keys = [k.strip() for k in SERPAPI_KEYS if k and k.strip()]
+    keys += [
+        k.strip()
+        for k in os.environ.get("SERPAPI_KEYS", "").split(",")
+        if k.strip()
+    ]
+    # duplicates hatao, order barqarar
+    return list(dict.fromkeys(keys))
+
+
+_key_lock = threading.Lock()
+_key_state = {"next": 0, "dead": {}}   # dead: {key: reason}
+
+KEY_PROBLEM_HINTS = (
+    "run out of searches", "out of searches", "invalid api key",
+    "api key", "limit", "exceeded", "too many requests",
+    "http 401", "http 403", "http 429", "account"
+)
+
+
+def _is_key_problem(err):
+    err = str(err or "").lower()
+    return any(h in err for h in KEY_PROBLEM_HINTS)
 
 
 def _serpapi_get(params, timeout=30):
-    """SerpApi response dict. Fail hone par {"error": "..."} milta hai
-    (error chhupaya nahi jata)."""
+    """SerpApi call, keys me rotate karta hai. Fail hone par
+    {"error": "..."} milta hai (error chhupaya nahi jata)."""
+    keys = _get_serpapi_keys()
+
+    if not keys:
+        return {"error": "No SerpApi key set"}
+
+    with _key_lock:
+        start = _key_state["next"]
+        _key_state["next"] = (start + 1) % len(keys)
+
+    last_error = ""
+
+    for i in range(len(keys)):
+        key = keys[(start + i) % len(keys)]
+
+        if key in _key_state["dead"]:
+            continue
+
+        body = _serpapi_request({**params, "api_key": key}, timeout)
+        err = body.get("error")
+
+        if err and _is_key_problem(err):
+            with _key_lock:
+                _key_state["dead"][key] = str(err)
+            last_error = f"key ...{key[-4:]}: {err}"
+            continue            # agli key try karo
+
+        return body
+
+    if last_error:
+        return {"error": f"All SerpApi keys failed. Last: {last_error}"}
+
+    return {"error": "All SerpApi keys failed (exhausted/invalid)"}
+
+
+def _serpapi_request(params, timeout=30):
     try:
         resp = requests.get(SERPAPI_URL, params=params, timeout=timeout)
     except requests.RequestException as e:
@@ -864,7 +929,7 @@ def _is_no_results(err):
     return "hasn't returned any results" in err or "no results" in err
 
 
-def _find_data_id(key, place_id, name, address):
+def _find_data_id(place_id, name, address):
     """(data_id, error) return karta hai."""
     last_error = ""
 
@@ -872,8 +937,7 @@ def _find_data_id(key, place_id, name, address):
     data = _serpapi_get({
         "engine": "google_maps",
         "type": "place",
-        "place_id": place_id,
-        "api_key": key
+        "place_id": place_id
     })
     data_id = (data.get("place_results") or {}).get("data_id")
     if data_id:
@@ -886,8 +950,7 @@ def _find_data_id(key, place_id, name, address):
     data = _serpapi_get({
         "engine": "google_maps",
         "type": "search",
-        "q": f"{name} {address}".strip(),
-        "api_key": key
+        "q": f"{name} {address}".strip()
     })
     results = data.get("local_results") or []
 
@@ -909,11 +972,10 @@ def _short(msg, n=120):
     return msg if len(msg) <= n else msg[:n - 1] + "..."
 
 
-def _recent_post_serpapi(key, lead):
+def _recent_post_serpapi(lead):
     """"3 days ago" / "No posts" / "Error: <reason>"."""
     try:
         data_id, err = _find_data_id(
-            key,
             lead.get("Place ID"),
             lead.get("Business Name", ""),
             lead.get("Address", "")
@@ -925,8 +987,7 @@ def _recent_post_serpapi(key, lead):
 
         data = _serpapi_get({
             "engine": "google_maps_posts",
-            "data_id": data_id,
-            "api_key": key
+            "data_id": data_id
         })
         posts = data.get("posts") or []
 
@@ -1003,18 +1064,20 @@ def _fetch_recent_posts_browser(leads):
 def fetch_recent_posts(leads):
     """leads me "Recent Post" fill karta hai (in place).
 
-    SERPAPI_KEY set ho to SerpApi (tez, 2 searches per lead);
-    warna browser method (slow, bina key)."""
-    key = _get_serpapi_key()
-
-    if not key:
+    SERPAPI_KEYS me key ho to SerpApi (tez, 2 searches per lead, keys
+    me rotation); warna browser method (slow, bina key)."""
+    if not _get_serpapi_keys():
         _fetch_recent_posts_browser(leads)
         return
 
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        results = list(pool.map(
-            lambda l: _recent_post_serpapi(key, l), leads
-        ))
+    # Har button-click par saari keys dobara try hongi
+    with _key_lock:
+        _key_state["dead"].clear()
+
+    workers = min(10, max(3, len(_get_serpapi_keys()) * 2))
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = list(pool.map(_recent_post_serpapi, leads))
 
     for l, r in zip(leads, results):
         l["Recent Post"] = r
