@@ -585,139 +585,139 @@ if not st.session_state["leads"].empty:
         f"currently shown."
     )
 
-    # ------------------------------------------------------------
-    # RECENT POST BUTTON (search ke saath nahi, button click par)
-    # ------------------------------------------------------------
-    if "Recent Post" not in st.session_state["leads"].columns:
-        st.session_state["leads"]["Recent Post"] = "Not checked"
-
-    # Pehle se saved ISO dates ("2026-11-12T21:49:39Z") ko "4 days ago" me badlo
-    st.session_state["leads"]["Recent Post"] = (
-        st.session_state["leads"]["Recent Post"]
-        .fillna("")
-        .astype(str)
-        .map(scraper.relative_age)
-    )
-
-    rp_series = (
-        st.session_state["leads"]["Recent Post"]
-        .fillna("")
-        .astype(str)
-    )
-
-    # "Not checked" / khali / "Error..." (retry) wali leads check hongi
-    pending_mask = (
-        rp_series.isin(["", "N/A"])
-        | rp_series.str.startswith("Not checked")
-        | rp_series.str.startswith("Error")
-    )
-
-    pending_count = int(pending_mask.sum())
-
-    if st.button(
-        f"CHECK RECENT POSTS ({pending_count} leads)",
-        use_container_width=True,
-        disabled=(pending_count == 0)
-    ):
-
-        pending_df = st.session_state["leads"][pending_mask]
-
-        to_check = [
-            {
-                "Place ID": r["Place ID"],
-                "Business Name": r.get("Business Name", ""),
-                "Address": r.get("Address", ""),
-                "Google Maps": scraper.build_maps_link(
-                    r["Place ID"],
-                    r.get("Business Name", ""),
-                    r.get("Address", "")
-                ),
-            }
-            for _, r in pending_df.iterrows()
-        ]
-
-        results = {}
-        BATCH = 10
-        progress = st.progress(0.0, text="Checking recent posts...")
-
-        for i in range(0, len(to_check), BATCH):
-
-            batch = to_check[i:i + BATCH]
-            scraper.fetch_recent_posts(batch)
-
-            for l in batch:
-                results[l["Place ID"]] = l["Recent Post"]
-
-            # Har batch ke baad foran save: beech me ruk jaye / error aaye
-            # to bhi jo leads ho chuki hain wo wapas check nahi hongi.
-            leads_df = st.session_state["leads"]
-            leads_df["Recent Post"] = [
-                results.get(pid, old)
-                for pid, old in zip(
-                    leads_df["Place ID"], leads_df["Recent Post"]
-                )
-            ]
-            st.session_state["leads"] = leads_df
-
-            done = min(i + BATCH, len(to_check))
-            progress.progress(
-                done / len(to_check),
-                text=f"Checked {done} of {len(to_check)} leads"
-            )
-
-            # Poori batch ek hi error se fail (jaise sab keys khatam /
-            # Playwright missing) -> baaki leads par waqt zaya na karo.
-            batch_vals = {l["Recent Post"] for l in batch}
-            if (
-                len(batch_vals) == 1
-                and next(iter(batch_vals)).startswith("Error")
-            ):
-                break
-
-        progress.empty()
-
-        # Errors ko dikhane ke liye save karo (rerun ke baad show hoga)
-        errs = sorted({
-            v for v in results.values() if str(v).startswith("Error")
-        })
-        st.session_state["rp_summary"] = {
-            "keys_loaded": (
-                len(scraper._get_serpapi_keys())
-                if hasattr(scraper, "_get_serpapi_keys") else None
-            ),
-            "checked": len(results),
-            "errors": errs,
-            "error_count": sum(
-                1 for v in results.values()
-                if str(v).startswith("Error")
-            ),
-        }
-
-        st.rerun()
-
-    summary = st.session_state.get("rp_summary")
-
-    if summary:
-        if summary["error_count"]:
-            kl = summary.get("keys_loaded")
-            key_note = (
-                "\n\n**Old scraper.py is still running - fully stop "
-                "and restart the app (Ctrl+C, then streamlit run app.py).**"
-                if kl is None
-                else f"\n\nSerpApi keys loaded: {kl}"
-            )
-            st.error(
-                f"Recent Post: {summary['error_count']} of "
-                f"{summary['checked']} leads failed. Reason(s):\n\n"
-                + "\n".join(f"- {e}" for e in summary["errors"][:5])
-                + "\n\nFailed leads will be retried on the next click."
-                + key_note
-            )
-        else:
-            st.success(
-                f"Recent Post checked for {summary['checked']} leads."
-            )
-
+#     # ------------------------------------------------------------
+#     # RECENT POST BUTTON (search ke saath nahi, button click par)
+#     # ------------------------------------------------------------
+#     if "Recent Post" not in st.session_state["leads"].columns:
+#         st.session_state["leads"]["Recent Post"] = "Not checked"
+#
+#     # Pehle se saved ISO dates ("2026-11-12T21:49:39Z") ko "4 days ago" me badlo
+#     st.session_state["leads"]["Recent Post"] = (
+#         st.session_state["leads"]["Recent Post"]
+#         .fillna("")
+#         .astype(str)
+#         .map(scraper.relative_age)
+#     )
+#
+#     rp_series = (
+#         st.session_state["leads"]["Recent Post"]
+#         .fillna("")
+#         .astype(str)
+#     )
+#
+#     # "Not checked" / khali / "Error..." (retry) wali leads check hongi
+#     pending_mask = (
+#         rp_series.isin(["", "N/A"])
+#         | rp_series.str.startswith("Not checked")
+#         | rp_series.str.startswith("Error")
+#     )
+#
+#     pending_count = int(pending_mask.sum())
+#
+#     if st.button(
+#         f"CHECK RECENT POSTS ({pending_count} leads)",
+#         use_container_width=True,
+#         disabled=(pending_count == 0)
+#     ):
+#
+#         pending_df = st.session_state["leads"][pending_mask]
+#
+#         to_check = [
+#             {
+#                 "Place ID": r["Place ID"],
+#                 "Business Name": r.get("Business Name", ""),
+#                 "Address": r.get("Address", ""),
+#                 "Google Maps": scraper.build_maps_link(
+#                     r["Place ID"],
+#                     r.get("Business Name", ""),
+#                     r.get("Address", "")
+#                 ),
+#             }
+#             for _, r in pending_df.iterrows()
+#         ]
+#
+#         results = {}
+#         BATCH = 10
+#         progress = st.progress(0.0, text="Checking recent posts...")
+#
+#         for i in range(0, len(to_check), BATCH):
+#
+#             batch = to_check[i:i + BATCH]
+#             scraper.fetch_recent_posts(batch)
+#
+#             for l in batch:
+#                 results[l["Place ID"]] = l["Recent Post"]
+#
+#             # Har batch ke baad foran save: beech me ruk jaye / error aaye
+#             # to bhi jo leads ho chuki hain wo wapas check nahi hongi.
+#             leads_df = st.session_state["leads"]
+#             leads_df["Recent Post"] = [
+#                 results.get(pid, old)
+#                 for pid, old in zip(
+#                     leads_df["Place ID"], leads_df["Recent Post"]
+#                 )
+#             ]
+#             st.session_state["leads"] = leads_df
+#
+#             done = min(i + BATCH, len(to_check))
+#             progress.progress(
+#                 done / len(to_check),
+#                 text=f"Checked {done} of {len(to_check)} leads"
+#             )
+#
+#             # Poori batch ek hi error se fail (jaise sab keys khatam /
+#             # Playwright missing) -> baaki leads par waqt zaya na karo.
+#             batch_vals = {l["Recent Post"] for l in batch}
+#             if (
+#                 len(batch_vals) == 1
+#                 and next(iter(batch_vals)).startswith("Error")
+#             ):
+#                 break
+#
+#         progress.empty()
+#
+#         # Errors ko dikhane ke liye save karo (rerun ke baad show hoga)
+#         errs = sorted({
+#             v for v in results.values() if str(v).startswith("Error")
+#         })
+#         st.session_state["rp_summary"] = {
+#             "keys_loaded": (
+#                 len(scraper._get_serpapi_keys())
+#                 if hasattr(scraper, "_get_serpapi_keys") else None
+#             ),
+#             "checked": len(results),
+#             "errors": errs,
+#             "error_count": sum(
+#                 1 for v in results.values()
+#                 if str(v).startswith("Error")
+#             ),
+#         }
+#
+#         st.rerun()
+#
+#     summary = st.session_state.get("rp_summary")
+#
+#     if summary:
+#         if summary["error_count"]:
+#             kl = summary.get("keys_loaded")
+#             key_note = (
+#                 "\n\n**Old scraper.py is still running - fully stop "
+#                 "and restart the app (Ctrl+C, then streamlit run app.py).**"
+#                 if kl is None
+#                 else f"\n\nSerpApi keys loaded: {kl}"
+#             )
+#             st.error(
+#                 f"Recent Post: {summary['error_count']} of "
+#                 f"{summary['checked']} leads failed. Reason(s):\n\n"
+#                 + "\n".join(f"- {e}" for e in summary["errors"][:5])
+#                 + "\n\nFailed leads will be retried on the next click."
+#                 + key_note
+#             )
+#         else:
+#             st.success(
+#                 f"Recent Post checked for {summary['checked']} leads."
+#             )
+#
     # Show every row on this same page (no internal scroll
     # cutting results short). Height grows with the number of
     # rows, capped so extremely large tables still scroll the
@@ -740,8 +740,10 @@ if not st.session_state["leads"].empty:
     ]
 
     # Latitude / Longitude are only used for distance maths.
+    # "Recent Post" feature abhi band hai (commented) -> column bhi
+    # table aur Excel dono se hata do taake purane "Error: ..." na dikhein.
     filtered_df = filtered_df.drop(
-        columns=["Latitude", "Longitude"],
+        columns=["Latitude", "Longitude", "Recent Post"],
         errors="ignore"
     )
 
@@ -797,6 +799,16 @@ if not st.session_state["leads"].empty:
             )
         }
     )
+
+    # Excel me illegal control characters export crash kar dete hain
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+    filtered_df = filtered_df.copy()
+    for _c in filtered_df.columns:
+        if filtered_df[_c].dtype == object:
+            filtered_df[_c] = filtered_df[_c].map(
+                lambda v: ILLEGAL_CHARACTERS_RE.sub("", v)
+                if isinstance(v, str) else v
+            )
 
     output = BytesIO()
 
